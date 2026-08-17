@@ -20,7 +20,7 @@ local function makeBillboard(): BillboardGui
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "BarricadeHP"
 	bb.Size = UDim2.fromOffset(HP.Width, HP.Height)
-	bb.AlwaysOnTop = HP.AlwaysOnTop == true
+	bb.AlwaysOnTop = true
 	bb.MaxDistance = HP.ShowDistance
 	bb.Enabled = false
 
@@ -137,7 +137,7 @@ function BarricadeHUD.Init()
 		local near = {}
 		for _, prop in CollectionService:GetTagged("BarricadeProp") do
 			if prop:GetAttribute("IsNailed") ~= true then continue end
-			local part = if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart")
+			local part = if prop:IsA("BasePart") then prop else (prop:IsA("Model") and (prop.PrimaryPart or prop:FindFirstChildWhichIsA("BasePart")))
 			if not part then continue end
 			local d = Placement.ReachDistance(root.Position, prop)
 			if d > HP.ShowDistance then continue end
@@ -162,7 +162,8 @@ function BarricadeHUD.Init()
 			local baseMax = math.max(prop:GetAttribute("BaseMaxHP") or maxHP, 1)
 
 			bb.Adornee = entry.part
-			bb.StudsOffsetWorldSpace = Vector3.new(0, (entry.part.Size.Y * 0.5) + HP.Offset, 0)
+			-- Размещаем ровно в центре объекта (в середине)
+			bb.StudsOffsetWorldSpace = Vector3.zero
 			bb.Enabled = true
 
 			local r = bb.Root
