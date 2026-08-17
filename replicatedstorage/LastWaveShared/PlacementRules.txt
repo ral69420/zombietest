@@ -1,8 +1,4 @@
 --!nonstrict
--- Одна геометрия установки для клиента и сервера.
--- Клиент рисует призрак ЭТОЙ функцией, сервер принимает решение ЭТОЙ ЖЕ функцией.
--- Итог: что зелёное, то встанет. Рассинхрона "призрак зелёный, а сервер отказал" не бывает.
-
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
@@ -51,7 +47,6 @@ function PlacementRules.Blockers(ignore: { Instance }?): { Instance }
 	return out
 end
 
--- Только пол, стены, потолок. Никаких подвисаний в пустоте.
 function PlacementRules.Solve(ctx): (CFrame?, string?)
 	local ignore = ctx.ignore or {}
 
@@ -75,32 +70,20 @@ function PlacementRules.Solve(ctx): (CFrame?, string?)
 	local normal = hit.Normal
 	local yaw = ctx.yaw or 0
 	local pos = hit.Position
-	local upDot = normal:Dot(Vector3.yAxis)
-	local isWall = math.abs(normal.Y) < 0.5
-	local isCeiling = upDot < -0.75
-	local isFloor = upDot > 0.75
+	local isFloor = normal.Y > 0.75
 
-	if isWall then
-		if B.AllowWall == false then return nil, "Только пол или потолок" end
-		if B.AlignToWall then yaw = math.atan2(normal.X, normal.Z) end
-		local flat = Vector3.new(normal.X, 0, normal.Z)
-		if flat.Magnitude > 0.05 then
-			pos = pos + flat.Unit * (size.Z * 0.5 + 0.05)
-		end
-	elseif isCeiling then
-		if B.AllowCeiling == false then return nil, "К потолку нельзя" end
-		pos = pos + Vector3.new(0, -(size.Y * 0.5 + 0.02), 0)
-	elseif isFloor then
-		if B.AllowFloor == false then return nil, "На пол нельзя" end
-		local slope = math.deg(math.acos(math.clamp(normal.Y, -1, 1)))
-		if slope > B.MaxSlopeDeg then return nil, "Слишком крутой склон" end
-		pos = pos + Vector3.new(0, size.Y * 0.5 + 0.02, 0)
-	else
-		return nil, "Только пол, стены или потолок"
+	if not isFloor then
+		return nil, "Только на пол"
+	end
+
+	local slope = math.deg(math.acos(math.clamp(normal.Y, -1, 1)))
+	if slope > B.MaxSlopeDeg then
+		return nil, "Слишком крутой склон"
 	end
 
 	yaw = PlacementRules.SnapYaw(yaw)
-	local cf = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
+
+	local cf = CFrame.new(pos + Vector3.new(0, size.Y * 0.5 + 0.02, 0)) * CFrame.Angles(0, yaw, 0)
 
 	local op = OverlapParams.new()
 	op.FilterType = Enum.RaycastFilterType.Include
