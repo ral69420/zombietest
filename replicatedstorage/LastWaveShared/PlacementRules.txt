@@ -8,6 +8,7 @@ local Config = require(script.Parent.Config)
 local PlacementRules = {}
 local B = Config.BARRICADE
 local TAG_PROP = "BarricadeProp"
+local DEFAULT_AIR_DIST = 10 -- Базовое расстояние перед игроком для свободного размещения
 
 function PlacementRules.SizeOf(prop: Instance): Vector3
 	local cached = prop:GetAttribute("PropSize")
@@ -61,36 +62,20 @@ function PlacementRules.Solve(ctx): (CFrame?, string?)
 		return nil, "Некуда ставить"
 	end
 
-	local hit = Workspace:Raycast(ctx.origin, dir.Unit * ctx.maxDist, rp)
-	if not hit then
-		return nil, "Слишком далеко: подойди ближе"
-	end
-
 	local size = ctx.size
-	local normal = hit.Normal
-	local yaw = ctx.yaw or 0
-	local pos = hit.Position
-	local isFloor = normal.Y > 0.75
+	local yaw = PlacementRules.SnapYaw(ctx.yaw or 0)
+	local hit = Workspace:Raycast(ctx.origin, dir.Unit * ctx.maxDist, rp)
 
-	if not isFloor then
-		return nil, "Только на пол"
-	end
-
-	local slope = math.deg(math.acos(math.clamp(normal.Y, -1, 1)))
-	if slope > B.MaxSlopeDeg then
-		return nil, "Слишком крутой склон"
-	end
-
-	yaw = PlacementRules.SnapYaw(yaw)
-
-	local cf = CFrame.new(pos + Vector3.new(0, size.Y * 0.5 + 0.02, 0)) * CFrame.Angles(0, yaw, 0)
-
-	local op = OverlapParams.new()
-	op.FilterType = Enum.RaycastFilterType.Include
-	op.FilterDescendantsInstances = PlacementRules.Blockers(ignore)
-	op.MaxParts = 1
-	if #Workspace:GetPartBoundsInBox(cf, size * B.OverlapShrink, op) > 0 then
-		return nil, "Здесь уже занято"
+	local cf: CFrame
+	if hit then
+		-- Если упёрлись в поверхность (пол, стена, потолок или другой объект)
+		local normal = hit.Normal
+		local pos = hit.Position + normal * (size.Y * 0.45)
+		cf = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
+	else
+		-- Свободное размещение в воздухе/пространстве перед собой на комфортной дистанции (10 studs)
+		local airPos = ctx.origin + dir.Unit * math.min(DEFAULT_AIR_DIST, ctx.maxDist)
+		cf = CFrame.new(airPos) * CFrame.Angles(0, yaw, 0)
 	end
 
 	return cf, nil
