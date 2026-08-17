@@ -1,709 +1,89 @@
 --!nonstrict
--- ═══════════════════════════════════════════════════════════════════════
--- AI-зомби: один планировщик на всех.
---
--- Модели больше НЕ живут здесь. Всё, что связано с ригом (поиск твоей
--- модели в ServerStorage.ZombieRigs, ремонт рига, оптимизация, серый
--- фоллбэк), делает модуль ZombieRig. Один резолвер на AI и на игроков ->
--- зомби-игрок и AI-зомби выглядят одинаково, и чинить надо одно место.
---
--- Что убрано по сравнению с самой первой версией:
---  * task.spawn на каждого зомби -> один Heartbeat, слайсами
---  * ComputeAsync на каждого каждые 1.2с -> глобальный кэш + бюджет 7/сек
---  * MoveToFinished:Wait(1.2) -> Humanoid:Move каждый тик, реакция 0.11с
---  * поиск цели внутри каждого зомби -> один снимок мира на 4 Гц
---  * Instance.new/Destroy в бою -> пул моделей
---
--- Приоритет решений: прямая видимость (дешёвый рейкаст) -> кэш пути ->
--- очередь на пересчёт. Большинство зомби вообще не трогают Pathfinding.
--- ═══════════════════════════════════════════════════════════════════════
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-local PathfindingService = game:GetService("PathfindingService")
-
-local Shared = game.ReplicatedStorage.LastWaveShared
-local Config = require(Shared.Config)
-local ZombieTypes = require(Shared.ZombieTypes)
-
-local PhysicsSetup = require(script.Parent.PhysicsSetup)
-local BarricadeManager = require(script.Parent.BarricadeManager)
-local PlayerManager = require(script.Parent.PlayerManager)
-local MatchState = require(script.Parent.MatchState)
-local ZombieRig = require(script.Parent.ZombieRig)
-
-local ZombieManager = {}
-
-local agents = {}          -- массив живых агентов (порядок = round-robin слайсы)
-local agentByModel = {}    -- [model] = agent
-local pool = {}            -- [zType] = { Model, ... }
-local aiFolder: Folder
-local sliceCursor = 1
-local spawning = false
-local spawnBudget = 0
-
--- ── общий снимок мира (считается 4 раза в секунду, а не 34×9 раз) ─────
-local world = {
-	t = 0,
-	survivors = {},  -- { {char, root, pos, downed}, ... }
-	props = {},      -- { {prop, part, pos}, ... }
-	sector = "",
-}
-
-local rayParams = RaycastParams.new() -- переиспользуем: без аллокаций в горячем цикле
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-rayParams.RespectCanCollide = true
-
--- ═══ КЭШ ПУТЕЙ ════════════════════════════════════════════════════════
--- Ключ = пара ячеек сетки. Все зомби в одной ячейке, идущие к одной цели,
--- используют ОДИН вычисленный маршрут. Это и есть главная экономия.
-local pathCache = {}   -- [key] = { points = {Vector3} | false, t = clock }
-local pathQueue = {}   -- FIFO запросов
-local queued = {}      -- [key] = true
-local pathPool = {}
-local pathUses = 0
-
-local function cellOf(pos: Vector3): string
-	local c = Config.AI_PATH_CELL
-	return string.format("%d_%d_%d",
-		math.floor(pos.X / c), math.floor(pos.Y / (c * 2)), math.floor(pos.Z / c))
+local Players=game:GetService("Players")
+local Workspace=game:GetService("Workspace")
+local RunService=game:GetService("RunService")
+local PathfindingService=game:GetService("PathfindingService")
+local Shared=game.ReplicatedStorage.LastWaveShared
+local Config=require(Shared.Config)
+local ZombieTypes=require(Shared.ZombieTypes)
+local PhysicsSetup=require(script.Parent.PhysicsSetup)
+local BarricadeManager=require(script.Parent.BarricadeManager)
+local PlayerManager=require(script.Parent.PlayerManager)
+local MatchState=require(script.Parent.MatchState)
+local ZombieRig=require(script.Parent.ZombieRig)
+local ZombieManager={}
+local agents,agentByModel,pool={}, {}, {}
+local aiFolder:Folder
+local sliceCursor,spawning,spawnBudget=1,false,0
+local world={t=0,survivors={},props={},sector=""}
+local rayParams=RaycastParams.new();rayParams.FilterType=Enum.RaycastFilterType.Exclude;rayParams.RespectCanCollide=true
+local pathCache,pathQueue,queued,pathPool={}, {}, {}, {}
+local pathUses=0
+local function cellOf(p:Vector3)local c=Config.AI_PATH_CELL;return string.format("%d_%d_%d",math.floor(p.X/c),math.floor(p.Y/(c*2)),math.floor(p.Z/c))end
+local function borrowPath(jump:boolean)
+	pathUses+=1;if pathUses%Config.AI_PATH_RECYCLE==0 then for _,p in pathPool do pcall(function()p:Destroy()end)end;table.clear(pathPool)end
+	local k=if jump then "jump" else "nojump";pathPool[k]=pathPool[k] or PathfindingService:CreatePath({AgentRadius=2.2,AgentHeight=5,AgentCanJump=jump,AgentCanClimb=false,WaypointSpacing=6,Costs={Barricade=12,Water=20}});return pathPool[k]
 end
-
-local function borrowPath(canJump: boolean)
-	-- Path-объекты переиспользуются и периодически пересоздаются:
-	-- это лечит деградацию ComputeAsync после сотен вызовов.
-	pathUses += 1
-	if pathUses % Config.AI_PATH_RECYCLE == 0 then
-		for _, p in pathPool do
-			pcall(function() p:Destroy() end)
-		end
-		table.clear(pathPool)
-	end
-
-	local key = if canJump then "jump" else "nojump"
-	pathPool[key] = pathPool[key] or PathfindingService:CreatePath({
-		AgentRadius = 2.2,
-		AgentHeight = 5,
-		AgentCanJump = canJump,
-		AgentCanClimb = false,
-		WaypointSpacing = 6,
-		Costs = { Barricade = 12, Water = 20 },
-	})
-	return pathPool[key]
+local function requestPath(a:Vector3,b:Vector3,jump:boolean):string
+	local k=cellOf(a)..">"..cellOf(b)..(if jump then "J" else "W");local cached=pathCache[k];if cached and os.clock()-cached.t<Config.AI_PATH_CACHE_TTL then return k end;if queued[k] or #pathQueue>40 then return k end;queued[k]=true;table.insert(pathQueue,{key=k,from=a,to=b,jump=jump});return k
 end
-
-local function requestPath(fromPos: Vector3, toPos: Vector3, canJump: boolean): string
-	local key = cellOf(fromPos) .. ">" .. cellOf(toPos) .. (if canJump then "J" else "W")
-	local cached = pathCache[key]
-	if cached and os.clock() - cached.t < Config.AI_PATH_CACHE_TTL then return key end
-	if queued[key] then return key end
-	if #pathQueue > 40 then return key end -- защита от лавины запросов
-	queued[key] = true
-	table.insert(pathQueue, { key = key, from = fromPos, to = toPos, jump = canJump })
-	return key
-end
-
 local function pathWorker()
-	local interval = 1 / math.max(Config.AI_PATH_BUDGET_PER_SEC, 1)
-	while true do
-		task.wait(interval)
-		local req = table.remove(pathQueue, 1)
-		if not req then continue end
-		queued[req.key] = nil
-
-		local path = borrowPath(req.jump)
-		local ok = pcall(function() path:ComputeAsync(req.from, req.to) end)
-		if not ok or path.Status ~= Enum.PathStatus.Success then
-			pathCache[req.key] = { points = false, t = os.clock() } -- запоминаем и провал
-			continue
-		end
-		local points = {}
-		for _, wp in path:GetWaypoints() do
-			table.insert(points, wp.Position)
-		end
-		pathCache[req.key] = { points = points, t = os.clock() }
-	end
+	while true do task.wait(1/math.max(Config.AI_PATH_BUDGET_PER_SEC,1));local r=table.remove(pathQueue,1);if r then queued[r.key]=nil;local p=borrowPath(r.jump);local ok=pcall(function()p:ComputeAsync(r.from,r.to)end);if not ok or p.Status~=Enum.PathStatus.Success then pathCache[r.key]={points=false,t=os.clock()}else local points={};for _,w in p:GetWaypoints() do table.insert(points,w.Position)end;pathCache[r.key]={points=points,t=os.clock()}end end end
 end
-
-local function cleanPathCache()
-	local now = os.clock()
-	for key, entry in pathCache do
-		if now - entry.t > Config.AI_PATH_CACHE_TTL * 3 then pathCache[key] = nil end
-	end
-end
-
--- ═══ РИГ: вся логика моделей живёт в ZombieRig ════════════════════════
-local function getRig(zType: string): Model?
-	local bucket = pool[zType]
-	if bucket and #bucket > 0 then
-		local reused = table.remove(bucket)
-		if reused and reused.Parent == nil then
-			ZombieRig.Reset(reused)
-			return reused
-		end
-	end
-	return ZombieRig.Build(zType, true)
-end
-
-local function recycle(char: Model, zType: string)
-	pool[zType] = pool[zType] or {}
-	local bucket = pool[zType]
-	if #bucket >= Config.AI_POOL_MAX then
-		char:Destroy()
-		return
-	end
-	char.Parent = nil
-	ZombieRig.Reset(char)
-	table.insert(bucket, char)
-end
-
-function ZombieManager.PoolSize(): number
-	local n = 0
-	for _, bucket in pool do n += #bucket end
-	return n
-end
-
--- ═══ СНИМОК МИРА ══════════════════════════════════════════════════════
+local function cleanPathCache()local now=os.clock();for k,e in pathCache do if now-e.t>Config.AI_PATH_CACHE_TTL*3 then pathCache[k]=nil end end end
+local function getRig(z:string)local b=pool[z];if b and #b>0 then local m=table.remove(b);if m and not m.Parent then ZombieRig.Reset(m);return m end end;return ZombieRig.Build(z,true)end
+local function recycle(m:Model,z:string)pool[z]=pool[z] or {};if #pool[z]>=Config.AI_POOL_MAX then m:Destroy();return end;m.Parent=nil;ZombieRig.Reset(m);table.insert(pool[z],m)end
+function ZombieManager.PoolSize()local n=0;for _,b in pool do n+=#b end;return n end
 local function updateWorld()
-	world.t = os.clock()
-	world.sector = MatchState.SectorName()
-
-	table.clear(world.survivors)
-	for _, p in PlayerManager.GetAllSurvivors() do
-		local char = p.Character
-		local root = char and char:FindFirstChild("HumanoidRootPart")
-		if root then
-			table.insert(world.survivors, {
-				char = char, root = root, pos = root.Position,
-				downed = char:GetAttribute("Downed") == true,
-			})
-		end
-	end
-
-	table.clear(world.props)
-	for _, prop in BarricadeManager.GetNailedInSector(world.sector) do
-		local part = if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart")
-		if part then
-			table.insert(world.props, { prop = prop, part = part, pos = part.Position })
-		end
-	end
+	world.t=os.clock();world.sector=MatchState.SectorName();table.clear(world.survivors);for _,p in PlayerManager.GetAllSurvivors() do local c=p.Character;local r=c and c:FindFirstChild("HumanoidRootPart");if r then table.insert(world.survivors,{char=c,root=r,pos=r.Position,downed=c:GetAttribute("Downed")==true})end end
+	table.clear(world.props);for _,prop in BarricadeManager.GetNailedInSector(world.sector) do local part=if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart");if part then table.insert(world.props,{prop=prop,part=part,pos=part.Position})end end
 end
-
--- ═══ СПАВН ════════════════════════════════════════════════════════════
-local warnedNoSpawns = false
-
-local function pickSpawn(): CFrame?
-	local folder = Workspace:FindFirstChild("ZombieSpawns")
-	if not folder then
-		if not warnedNoSpawns then
-			warnedNoSpawns = true
-			warn("[AI] Workspace.ZombieSpawns отсутствует - AI-зомби спавнить негде")
-		end
-		return nil
-	end
-
-	local candidates = {}
-	local anyInSector = false
-	for _, part in folder:GetDescendants() do
-		if not part:IsA("BasePart") then continue end
-		local sec = part:GetAttribute("Sector")
-		if sec ~= nil and sec ~= world.sector then continue end
-		anyInSector = true
-		local ok = true
-		for _, s in world.survivors do
-			if (s.pos - part.Position).Magnitude < Config.AI_MIN_SPAWN_DIST then ok = false; break end
-		end
-		if ok then table.insert(candidates, part) end
-	end
-
-	if #candidates == 0 then
-		if not anyInSector and not warnedNoSpawns then
-			warnedNoSpawns = true
-			warn(("[AI] в ZombieSpawns нет точек с атрибутом Sector = '%s'"):format(tostring(world.sector)))
-		end
-		return nil
-	end
-	return candidates[math.random(1, #candidates)].CFrame + Vector3.new(0, 3, 0)
+local warnedNoSpawns=false
+local function pickSpawn():CFrame?
+	local f=Workspace:FindFirstChild("ZombieSpawns");if not f then if not warnedNoSpawns then warnedNoSpawns=true;warn("[AI] Workspace.ZombieSpawns отсутствует")end;return nil end
+	local list={};for _,part in f:GetDescendants() do if part:IsA("BasePart") then local sec=part:GetAttribute("Sector");if sec==nil or sec==world.sector then local ok=true;for _,s in world.survivors do if (s.pos-part.Position).Magnitude<Config.AI_MIN_SPAWN_DIST then ok=false;break end end;if ok then table.insert(list,part)end end end end
+	if #list==0 then return nil end;return list[math.random(1,#list)].CFrame+Vector3.new(0,3,0)
 end
-
-function ZombieManager.Count(): number
-	return #agents
+local function playerCount()return math.max(#Players:GetPlayers(),1)end
+local W=Config.WAVE_ZOMBIES
+local function aliveCap()return math.clamp(playerCount()*W.AlivePerPlayer,W.AliveMin,math.min(W.AliveMax,Config.AI_MAX_CONCURRENT))end
+local function waveBudget(wave:number)local n=(W.Base+playerCount()*W.PerPlayer)*(1+(wave-1)*W.Growth);if W.CountPlayerZombies then n-=#PlayerManager.GetAllZombies()end;return math.clamp(math.floor(n+0.5),1,W.Max)end
+local function spawnInterval()return math.max(W.MinSpawnInterval,W.SpawnIntervalBase+(playerCount()-1)*W.SpawnIntervalPerPlayer)end
+function ZombieManager.Count()return #agents end
+function ZombieManager.SpawnAI(zType:string):Model?
+	if #agents>=aliveCap() then return nil end;local cf=pickSpawn();if not cf then return nil end;local def=ZombieTypes[zType] or ZombieTypes.Walker;if def.PlayerOnly then def=ZombieTypes.Walker;zType="Walker"end;local char=getRig(zType);if not char then return nil end
+	char.Name="Infected_"..zType;char:SetAttribute("Role","Zombie");char:SetAttribute("ZombieType",zType);char:SetAttribute("IsAI",true);local hum=char:FindFirstChildWhichIsA("Humanoid");local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart");if not hum or not root then char:Destroy();return nil end
+	hum.MaxHealth=def.MaxHealth*Config.AI_HEALTH_MULT;hum.Health=hum.MaxHealth;hum.WalkSpeed=def.WalkSpeed*Config.AI_SPEED_MULT;hum.JumpPower=def.JumpPower;char.Parent=aiFolder;char:PivotTo(cf);PhysicsSetup.ApplyToCharacter(char,"Zombie");require(script.Parent.RigScale).ApplyZombie(char,hum,zType);ZombieRig.GiveOwnership(char,nil)
+	local a={model=char,hum=hum,root=root,def=def,zType=zType,nextThink=0,target=nil,blockedBy=nil,pathKey=nil,pathIndex=1,pathTime=0,losOk=false,losTime=0,lastAttack=0,lastPos=root.Position,stuck=0,dead=false};agentByModel[char]=a;table.insert(agents,a);hum.Died:Connect(function()a.dead=true end);return char
 end
-
-function ZombieManager.SpawnAI(zType: string): Model?
-	if #agents >= aliveCap() then return end   -- было Config.AI_MAX_CONCURRENT
-	local cf = pickSpawn()
-	if not cf then return nil end
-
-	local def = ZombieTypes[zType] or ZombieTypes.Walker
-	if def.PlayerOnly then def = ZombieTypes.Walker; zType = "Walker" end
-
-	local char = getRig(zType)
-	if not char then return nil end -- модель не собралась: волну не роняем
-
-	char.Name = "Infected_" .. zType
-	char:SetAttribute("Role", "Zombie")
-	char:SetAttribute("ZombieType", zType)
-	char:SetAttribute("IsAI", true)
-
-	local hum = char:FindFirstChildWhichIsA("Humanoid")
-	local root = char.PrimaryPart or char:FindFirstChild("HumanoidRootPart")
-	if not hum or not root then
-		char:Destroy()
-		return nil
-	end
-
-	hum.MaxHealth = def.MaxHealth * Config.AI_HEALTH_MULT
-	hum.Health = hum.MaxHealth
-	hum.WalkSpeed = def.WalkSpeed * Config.AI_SPEED_MULT
-	hum.JumpPower = def.JumpPower
-
-	-- optimizeRig больше не нужен: ZombieRig.Prepare всё сделал при сборке
-	char.Parent = aiFolder
-	char:PivotTo(cf)
-	PhysicsSetup.ApplyToCharacter(char, "Zombie")
-	require(script.Parent.RigScale).ApplyZombie(char, hum, zType)
-	ZombieRig.GiveOwnership(char, nil) -- физику AI считает сервер
-
-	local agent = {
-		model = char, hum = hum, root = root, def = def, zType = zType,
-		nextThink = 0, target = nil, targetDist = 0, blockedBy = nil,
-		pathKey = nil, pathIndex = 1, pathTime = 0,
-		losOk = false, losTime = 0,
-		lastAttack = 0, lastPos = root.Position, stuck = 0,
-		state = "Hunt", dead = false,
-	}
-	agentByModel[char] = agent
-	table.insert(agents, agent)
-
-	hum.Died:Connect(function()
-		agent.dead = true
-	end)
-
-	return char
+local function removeAgent(i:number)local a=agents[i];if not a then return end;agentByModel[a.model]=nil;table.remove(agents,i);local m=a.model;if m and m.Parent then task.delay(3.5,function()if m.Parent then recycle(m,a.zType)end end)end end
+local function los(a,pos):boolean
+	rayParams.FilterDescendantsInstances={a.model};local res=Workspace:Raycast(a.root.Position+Vector3.new(0,1.5,0),pos-(a.root.Position+Vector3.new(0,1.5,0)),rayParams);if not res then a.blockedBy=nil;return true end;a.blockedBy=BarricadeManager.ResolveProp(res.Instance);return false
 end
-
-local function removeAgent(index: number)
-	local agent = agents[index]
-	if not agent then return end
-	agentByModel[agent.model] = nil
-	table.remove(agents, index)
-	local char = agent.model
-	if char and char.Parent then
-		task.delay(3.5, function()
-			if char.Parent then recycle(char, agent.zType) end
-		end)
-	end
+local function target(a)local best,bd=nil,400;for _,s in world.survivors do local d=(s.pos-a.root.Position).Magnitude+(s.downed and 25 or 0);if d<bd then bd=d;best=s end end;return best end
+local function nearestProp(a,maxDist)local best,bd=nil,maxDist;for _,p in world.props do local d=(p.pos-a.root.Position).Magnitude;if d<bd then best=p;bd=d end end;return best end
+local function separate(a)local push=Vector3.zero;local count=0;for _,o in agents do if o~=a and not o.dead then local d=a.root.Position-o.root.Position;local n=d.Magnitude;if n>0.1 and n<Config.AI_SEPARATION_RADIUS then push+=d.Unit*(1-n/Config.AI_SEPARATION_RADIUS);count+=1;if count>=4 then break end end end end;return push*Config.AI_SEPARATION_FORCE end
+local function attack(a,s)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;PlayerManager.ApplyDamage(s.char,a.def.Damage*Config.AI_DAMAGE_MULT,nil)end
+local function attackProp(a,p)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;BarricadeManager.DamageProp(p.prop,a.def.Damage*a.def.PropDamageMultiplier*Config.AI_PROP_DAMAGE_MULT,nil)end
+local function followPath(a,pos):Vector3?
+	local jump=a.def.JumpPower>0;local now=os.clock();if not a.pathKey or now-a.pathTime>Config.AI_PATH_MAX_AGE then a.pathKey=requestPath(a.root.Position,pos,jump);a.pathTime=now;a.pathIndex=1 end;local e=pathCache[a.pathKey];if not e or e.points==false then return nil end;local my=a.root.Position;while a.pathIndex<=#e.points and (Vector3.new(e.points[a.pathIndex].X,0,e.points[a.pathIndex].Z)-Vector3.new(my.X,0,my.Z)).Magnitude<Config.AI_WAYPOINT_REACH do a.pathIndex+=1 end;if a.pathIndex>#e.points then a.pathKey=nil;return nil end;local wp=e.points[a.pathIndex];if jump and wp.Y-my.Y>3 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end;return wp-my
 end
-
--- ═══ МОЗГИ ════════════════════════════════════════════════════════════
-local function hasLineOfSight(agent, targetPos: Vector3): boolean
-	rayParams.FilterDescendantsInstances = { agent.model }
-	local origin = agent.root.Position + Vector3.new(0, 1.5, 0)
-	local dir = targetPos - origin
-	if dir.Magnitude < 0.1 then return true end
-	local res = Workspace:Raycast(origin, dir, rayParams)
-	if not res then
-		agent.blockedBy = nil
-		return true
-	end
-	-- баррикада на пути = не видно, но это и есть цель для Brute
-	local prop = BarricadeManager.ResolveProp(res.Instance)
-	agent.blockedBy = prop
-	return false
+local function think(a)
+	if a.hum.Health<=0 then a.dead=true;return end;local my=a.root.Position;local s=target(a);if not s then a.hum:Move(Vector3.zero);a.nextThink=os.clock()+0.8;return end;local dist=(s.pos-my).Magnitude;if dist>Config.AI_DESPAWN_DIST then a.dead=true;return end;local rate=1/Config.AI_TICK_HZ;if dist>Config.AI_LOD_FAR then rate*=4 elseif dist>Config.AI_LOD_NEAR then rate*=2 end;a.nextThink=os.clock()+rate
+	if dist<=a.def.AttackRange+Config.AI_ATTACK_SLACK and (a.losOk or los(a,s.pos)) then attack(a,s);a.hum:Move(Vector3.zero);return end;local now=os.clock();if now-a.losTime>Config.AI_LOS_RECHECK then a.losTime=now;a.losOk=los(a,s.pos)end;local desired;if a.losOk then a.pathKey=nil;desired=s.pos-my elseif a.blockedBy and a.def.PropDamageMultiplier>=1.5 then local part=if a.blockedBy:IsA("BasePart") then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart");if part and (part.Position-my).Magnitude<=a.def.AttackRange+2 then attackProp(a,{prop=a.blockedBy,part=part});a.hum:Move(Vector3.zero);return end;desired=part and part.Position-my else desired=followPath(a,s.pos) or s.pos-my end
+	if (my-a.lastPos).Magnitude<Config.AI_STUCK_DIST then a.stuck+=rate else a.stuck=0 end;a.lastPos=my;if a.stuck>=Config.AI_STUCK_TIME then a.stuck=0;local p=nearestProp(a,a.def.AttackRange+3);if p then attackProp(a,p);a.hum:Move(Vector3.zero);return end;a.pathKey=nil;local side=math.random()>0.5 and 1 or -1;local flat=Vector3.new(desired.X,0,desired.Z);if flat.Magnitude>0.1 then desired+=Vector3.new(-flat.Z,0,flat.X).Unit*12*side end;if a.def.JumpPower>0 and math.random()<0.4 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end end
+	local flat=Vector3.new(desired.X,0,desired.Z);a.hum:Move(flat.Magnitude>0.1 and (flat.Unit+separate(a)).Unit or Vector3.zero);a.hum.WalkSpeed=a.def.WalkSpeed*Config.AI_SPEED_MULT*(a.model:GetAttribute("Enraged") and 1.35 or 1)
 end
-
-local function pickTarget(agent)
-	local best, bestDist = nil, 400
-	local myPos = agent.root.Position
-	for _, s in world.survivors do
-		local d = (s.pos - myPos).Magnitude
-		if s.downed then d += 25 end -- упавший интересен меньше, чем стоящий
-		if d < bestDist then bestDist = d; best = s end
-	end
-	agent.target = best
-	agent.targetDist = bestDist
-	return best
+local function schedulerStep()
+	local phase=MatchState.Phase();if phase=="GameOver" or phase=="Intermission" then if #agents>0 then ZombieManager.ClearAllAI()end;return end;if os.clock()-world.t>1/Config.AI_SNAPSHOT_HZ then updateWorld()end;for i=#agents,1,-1 do local a=agents[i];if a.dead or not a.model.Parent or a.hum.Health<=0 then removeAgent(i)end end;local now=os.clock();local done=0;for _=1,#agents do if done>=math.max(Config.AI_SLICE,1) then break end;sliceCursor=sliceCursor%math.max(#agents,1)+1;local a=agents[sliceCursor];if a and now>=a.nextThink then done+=1;local ok,e=pcall(think,a);if not ok then warn("[AI] think: "..tostring(e));a.nextThink=now+1 end end end
 end
-
-local function nearestProp(agent, maxDist: number)
-	local best, bd = nil, maxDist
-	local myPos = agent.root.Position
-	for _, p in world.props do
-		local d = (p.pos - myPos).Magnitude
-		if d < bd then bd = d; best = p end
-	end
-	return best, bd
+function ZombieManager.WaveCleared()return not spawning and spawnBudget<=0 and #agents==0 end
+function ZombieManager.StartWave(wave:number)
+	if not Config.AI_ENABLED then return end;spawning=true;spawnBudget=waveBudget(wave);task.spawn(function()local mix={"Walker","Walker","Walker","Runner"};if wave>=2 then table.insert(mix,"Brute")end;if wave>=3 then table.insert(mix,"Runner")end;if wave>=4 then table.insert(mix,"Brute")end;while spawning and spawnBudget>0 and MatchState.Phase()=="Wave" do if #agents<aliveCap() then if ZombieManager.SpawnAI(mix[math.random(1,#mix)]) then spawnBudget-=1 end end;task.wait(spawnInterval())end;spawning=false end)
 end
-
-local function separation(agent): Vector3
-	-- расталкивание: без него зомби слипаются в один комок и застревают
-	local myPos = agent.root.Position
-	local push = Vector3.zero
-	local r = Config.AI_SEPARATION_RADIUS
-	local count = 0
-	for _, other in agents do
-		if other == agent or other.dead then continue end
-		local delta = myPos - other.root.Position
-		local d = delta.Magnitude
-		if d > 0.1 and d < r then
-			push += delta.Unit * (1 - d / r)
-			count += 1
-			if count >= 4 then break end -- хватает 4 соседей, дальше не считаем
-		end
-	end
-	return push * Config.AI_SEPARATION_FORCE
-end
-
-local function attackSurvivor(agent, s)
-	local now = os.clock()
-	if now - agent.lastAttack < agent.def.AttackCooldown then return end
-	agent.lastAttack = now
-	PlayerManager.ApplyDamage(s.char, agent.def.Damage * Config.AI_DAMAGE_MULT, nil)
-end
-
-local function attackProp(agent, propEntry)
-	local now = os.clock()
-	if now - agent.lastAttack < agent.def.AttackCooldown then return end
-	agent.lastAttack = now
-	-- одна тушка не должна снести главную баррикаду
-	BarricadeManager.DamageProp(
-		propEntry.prop,
-		agent.def.Damage * agent.def.PropDamageMultiplier * Config.AI_PROP_DAMAGE_MULT,
-		nil
-	)
-end
-
-local function followPath(agent, targetPos: Vector3): Vector3?
-	local canJump = agent.def.JumpPower > 0
-	local now = os.clock()
-	if not agent.pathKey or now - agent.pathTime > Config.AI_PATH_MAX_AGE then
-		agent.pathKey = requestPath(agent.root.Position, targetPos, canJump)
-		agent.pathTime = now
-		agent.pathIndex = 1
-	end
-
-	local entry = pathCache[agent.pathKey]
-	if not entry or entry.points == false then
-		return nil -- пути нет: пойдём напрямик, всё равно грызть стену
-	end
-
-	local points = entry.points
-	local myPos = agent.root.Position
-	-- продвигаем индекс, пока вейпоинты уже пройдены
-	while agent.pathIndex <= #points do
-		local wp = points[agent.pathIndex]
-		if (Vector3.new(wp.X, 0, wp.Z) - Vector3.new(myPos.X, 0, myPos.Z)).Magnitude
-			< Config.AI_WAYPOINT_REACH then
-			agent.pathIndex += 1
-		else
-			break
-		end
-	end
-	if agent.pathIndex > #points then
-		agent.pathKey = nil
-		return nil
-	end
-
-	local wp = points[agent.pathIndex]
-	if canJump and wp.Y - myPos.Y > 3 then
-		agent.hum:ChangeState(Enum.HumanoidStateType.Jumping)
-	end
-	return wp - myPos
-end
-
-local function think(agent, dt: number)
-	local hum, root, def = agent.hum, agent.root, agent.def
-	if hum.Health <= 0 then agent.dead = true; return end
-
-	local myPos = root.Position
-	local s = pickTarget(agent)
-
-	-- нет цели -> замри, не жги CPU
-	if not s then
-		hum:Move(Vector3.zero)
-		agent.nextThink = os.clock() + 0.8
-		return
-	end
-
-	local dist = (s.pos - myPos).Magnitude
-
-	-- слишком далеко и не нужен -> в пул, освобождаем слот под ближнего
-	if dist > Config.AI_DESPAWN_DIST then
-		agent.dead = true
-		return
-	end
-
-	-- LOD: ближние думают 9 раз в секунду, дальние в 4 раза реже
-	local tickRate = 1 / Config.AI_TICK_HZ
-	if dist > Config.AI_LOD_FAR then
-		tickRate *= 4
-	elseif dist > Config.AI_LOD_NEAR then
-		tickRate *= 2
-	end
-	agent.nextThink = os.clock() + tickRate
-
-	-- 1. Достаём цель рукой
-	if dist <= def.AttackRange + Config.AI_ATTACK_SLACK then
-		if agent.losOk or hasLineOfSight(agent, s.pos) then
-			attackSurvivor(agent, s)
-			hum:Move(Vector3.zero)
-			agent.state = "Attack"
-			return
-		end
-	end
-
-	-- 2. Отступление из сильной зоны: раненый не лезет в толпу
-	if hum.Health < hum.MaxHealth * 0.35 then
-		local nearby = 0
-		for _, o in world.survivors do
-			if not o.downed and (o.pos - myPos).Magnitude < 18 then nearby += 1 end
-		end
-		if nearby >= 3 then
-			agent.state = "Retreat"
-			local away = myPos - s.pos
-			hum:Move(Vector3.new(away.X, 0, away.Z).Unit + separation(agent))
-			return
-		end
-	end
-
-	-- 3. Прямая видимость (дешёвый рейкаст, не чаще AI_LOS_RECHECK)
-	local now = os.clock()
-	if now - agent.losTime > Config.AI_LOS_RECHECK then
-		agent.losTime = now
-		agent.losOk = hasLineOfSight(agent, s.pos)
-	end
-
-	local desired: Vector3? = nil
-	if agent.losOk then
-		agent.state = "Hunt"
-		agent.pathKey = nil                      -- видим цель -> путь не нужен вообще
-		desired = s.pos - myPos
-	else
-		-- 4. Разрушитель ломает то, что мешает, вместо обхода
-		if agent.blockedBy and def.PropDamageMultiplier >= 1.5 then
-			local part = if agent.blockedBy:IsA("BasePart")
-				then agent.blockedBy
-				else agent.blockedBy:FindFirstChildWhichIsA("BasePart")
-			if part and (part.Position - myPos).Magnitude <= def.AttackRange + 2 then
-				agent.state = "Break"
-				attackProp(agent, { prop = agent.blockedBy, part = part, pos = part.Position })
-				hum:Move(Vector3.zero)
-				return
-			end
-			if part then desired = part.Position - myPos end
-		end
-		if not desired then
-			agent.state = "Path"
-			desired = followPath(agent, s.pos) or (s.pos - myPos)
-		end
-	end
-
-	-- 5. Застрял -> грызём ближайшую баррикаду, иначе шаг в сторону
-	if (myPos - agent.lastPos).Magnitude < Config.AI_STUCK_DIST then
-		agent.stuck += tickRate
-	else
-		agent.stuck = 0
-	end
-	agent.lastPos = myPos
-
-	if agent.stuck >= Config.AI_STUCK_TIME then
-		agent.stuck = 0
-		local propEntry = nearestProp(agent, def.AttackRange + 3)
-		if propEntry then
-			agent.state = "Break"
-			attackProp(agent, propEntry)
-			hum:Move(Vector3.zero)
-			return
-		end
-		agent.pathKey = nil
-		-- обход: шаг вбок, а не бессмысленное упирание в угол
-		local base = desired or Vector3.zero
-		if base.Magnitude > 0.1 then
-			local side = if math.random() > 0.5 then 1 else -1
-			desired = base + Vector3.new(-base.Z, 0, base.X).Unit * 12 * side
-		end
-		if def.JumpPower > 0 and math.random() < 0.4 then
-			hum:ChangeState(Enum.HumanoidStateType.Jumping)
-		end
-	end
-
-	-- 6. Движение: Humanoid:Move вместо MoveTo -> нет внутренних таймаутов
-	local d = desired or Vector3.zero
-	local flat = Vector3.new(d.X, 0, d.Z)
-	if flat.Magnitude > 0.1 then
-		hum:Move((flat.Unit + separation(agent)).Unit)
-	else
-		hum:Move(Vector3.zero)
-	end
-
-	-- бонус ярости от Mutant Roar
-	if agent.model:GetAttribute("Enraged") then
-		hum.WalkSpeed = def.WalkSpeed * Config.AI_SPEED_MULT * 1.35
-	else
-		hum.WalkSpeed = def.WalkSpeed * Config.AI_SPEED_MULT
-	end
-end
-
--- ═══ ГЛАВНЫЙ ЦИКЛ: один Heartbeat на всех, работа размазана слайсами ══
-local function schedulerStep(dt: number)
-	local phase = MatchState.Phase()
-	if phase == "GameOver" or phase == "Intermission" then
-		if #agents > 0 then ZombieManager.ClearAllAI() end
-		return
-	end
-
-	if os.clock() - world.t > 1 / Config.AI_SNAPSHOT_HZ then
-		updateWorld()
-	end
-
-	-- уборка мёртвых
-	for i = #agents, 1, -1 do
-		local a = agents[i]
-		if a.dead or not a.model.Parent or a.hum.Health <= 0 then
-			a.dead = true
-			removeAgent(i)
-		end
-	end
-
-	local total = #agents
-	if total == 0 then return end
-
-	local now = os.clock()
-	local processed = 0
-	local slice = math.max(Config.AI_SLICE, 1)
-
-	-- round-robin: за кадр трогаем максимум AI_SLICE агентов
-	for _ = 1, total do
-		if processed >= slice then break end
-		sliceCursor += 1
-		if sliceCursor > #agents then sliceCursor = 1 end
-		local agent = agents[sliceCursor]
-		if not agent then break end
-		if now >= agent.nextThink then
-			processed += 1
-			local ok, err = pcall(think, agent, dt)
-			if not ok then
-				warn("[AI] think: " .. tostring(err))
-				agent.nextThink = now + 1
-			end
-		end
-	end
-end
-
--- ═══ ВОЛНЫ: количество зависит от числа игроков ════════════════════════
-local W = Config.WAVE_ZOMBIES
-
-local function playerCount(): number
-	return math.max(#Players:GetPlayers(), 1)
-end
-
--- 1 игрок, волна 1 -> 2 зомби. 5 игроков, волна 1 -> 6 зомби.
-local function waveBudget(wave: number): number
-	local total = (W.Base + playerCount() * W.PerPlayer) * (1 + (wave - 1) * W.Growth)
-	if W.CountPlayerZombies then
-		total -= #PlayerManager.GetAllZombies()
-	end
-	return math.clamp(math.floor(total + 0.5), 1, W.Max)
-end
-
-local function aliveCap(): number
-	return math.clamp(
-		playerCount() * W.AlivePerPlayer,
-		W.AliveMin,
-		math.min(W.AliveMax, Config.AI_MAX_CONCURRENT)
-	)
-end
-
-local function spawnInterval(): number
-	return math.max(
-		W.MinSpawnInterval,
-		W.SpawnIntervalBase + (playerCount() - 1) * W.SpawnIntervalPerPlayer
-	)
-end
-
-function ZombieManager.WaveCleared(): boolean
-	return (not spawning) and spawnBudget <= 0 and #agents == 0
-end
-
-function ZombieManager.StartWave(wave: number)
-	if not Config.AI_ENABLED then return end
-	spawning = true
-	spawnBudget = waveBudget(wave)
-	print(("[AI] волна %d: %d зомби на %d игроков, одновременно до %d")
-		:format(wave, spawnBudget, playerCount(), aliveCap()))
-
-	task.spawn(function()
-		local mix = { "Walker", "Walker", "Walker", "Runner" }
-		if wave >= 2 then table.insert(mix, "Brute") end
-		if wave >= 3 then table.insert(mix, "Runner") end
-		if wave >= 4 then table.insert(mix, "Brute") end
-
-		while spawning and spawnBudget > 0 do
-			local phase = MatchState.Phase()
-			if phase ~= "Wave" and phase ~= "Evacuation" then break end
-			if #agents < aliveCap() then
-				local pick = mix[math.random(1, #mix)]
-				if ZombieManager.SpawnAI(pick) then spawnBudget -= 1 end
-			end
-			task.wait(spawnInterval())
-		end
-		spawning = false
-	end)
-end
-
-function ZombieManager.StopWave()
-	spawning = false
-	spawnBudget = 0
-end
-
-function ZombieManager.ClearAllAI()
-	spawning = false
-	for i = #agents, 1, -1 do
-		local a = agents[i]
-		agentByModel[a.model] = nil
-		table.remove(agents, i)
-		if a.model.Parent then recycle(a.model, a.zType) end
-	end
-	table.clear(pathQueue)
-	table.clear(queued)
-	table.clear(pathCache)
-end
-
+function ZombieManager.StopWave()spawning=false;spawnBudget=0 end
+function ZombieManager.ClearAllAI()spawning=false;for i=#agents,1,-1 do local a=agents[i];agentByModel[a.model]=nil;table.remove(agents,i);if a.model.Parent then recycle(a.model,a.zType)end end;table.clear(pathQueue);table.clear(queued);table.clear(pathCache)end
 function ZombieManager.Init()
-	aiFolder = Workspace:FindFirstChild("AIZombies")
-	if not aiFolder then
-		aiFolder = Instance.new("Folder")
-		aiFolder.Name = "AIZombies"
-		aiFolder.Parent = Workspace
-	end
-
-	updateWorld()
-	task.spawn(pathWorker)
-
-	task.spawn(function()
-		while true do
-			task.wait(6)
-			cleanPathCache()
-		end
-	end)
-
-	RunService.Heartbeat:Connect(function(dt)
-		local ok, err = pcall(schedulerStep, dt)
-		if not ok then warn("[AI] scheduler: " .. tostring(err)) end
-	end)
-
-	-- модели пула греем заранее: первый Brute не должен лагать волну
-	task.defer(function()
-		if not Config.AI_ENABLED then return end
-		for _, zType in { "Walker", "Runner", "Brute" } do
-			for _ = 1, 3 do
-				local m = ZombieRig.Build(zType, true)
-				if not m then break end
-				recycle(m, zType)
-			end
-		end
-	end)
+	aiFolder=Workspace:FindFirstChild("AIZombies") or Instance.new("Folder");aiFolder.Name="AIZombies";aiFolder.Parent=Workspace;updateWorld();task.spawn(pathWorker);task.spawn(function()while true do task.wait(6);cleanPathCache()end end);RunService.Heartbeat:Connect(function()local ok,e=pcall(schedulerStep);if not ok then warn("[AI] scheduler: "..tostring(e))end end);task.defer(function()if Config.AI_ENABLED then for _,z in {"Walker","Runner","Brute"} do for _=1,3 do local m=ZombieRig.Build(z,true);if not m then break end;recycle(m,z)end end end end)
 end
-
 return ZombieManager
