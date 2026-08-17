@@ -30,11 +30,11 @@ local isFrozen = false
 local frozenCF: CFrame? = nil
 local frozenAim: Vector3? = nil
 local freezeOriginPos: Vector3? = nil
-local FREEZE_MAX_DIST = 16 -- ~4-5 метров (в studs: 1 метр ~ 3.57 studs, 16 studs ~ 4.5м)
+local FREEZE_MAX_DIST = 16 -- ~4.5м (16 studs)
 
 local ROT_STEP = 15
 local HEIGHT_SPEED = 2
-local MAX_HEIGHT = 2.5
+local MAX_HEIGHT = 4
 
 local function char() return player.Character end
 local function hammerEquipped() local c = char(); return c and c:GetAttribute("HammerEquipped") == true end
@@ -87,8 +87,8 @@ local function setHighlight(p: Instance?, valid: boolean)
 		if carryHL then carryHL:Destroy() end
 		local h = Instance.new("Highlight")
 		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		h.FillTransparency = 0.8
-		h.OutlineTransparency = 0
+		h.FillTransparency = 0.82
+		h.OutlineTransparency = 0.1
 		h.Adornee = p
 		h.Parent = p
 		carryHL = h
@@ -127,9 +127,9 @@ function M.GetHint()
 	if c and c:GetAttribute("Role") == "Zombie" then return "ЛКМ бить · R способность", nil end
 	if carried then
 		if isFrozen then
-			return "🔒 [SHIFT] ЗАФИКСИРОВАНО · ЛКМ/Y поставить · R вращать · SHIFT снять фриз", reason
+			return "🔒 [SHIFT] ЗАФИКСИРОВАНО · ЛКМ/Y поставить · R вращать · SHIFT снять", reason
 		else
-			return "ЛКМ / Y поставить · [SHIFT] зафиксировать · R поворот · E бросить", reason
+			return "ЛКМ / Y поставить · [SHIFT] зафиксировать · R поворот · Колёсико высота · E бросить", reason
 		end
 	end
 	if hammerEquipped() then return "ЛКМ чинить · ПКМ удерживать для снятия", nil end
@@ -297,7 +297,8 @@ function M.Init()
 			M.TryPlace()
 		elseif i.KeyCode == Enum.KeyCode.R then
 			if carried then
-				M.Rotate(1, false)
+				local isShift = UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift)
+				M.Rotate(1, isShift)
 			elseif role == "Zombie" then
 				M.Ability()
 			end
@@ -339,7 +340,6 @@ function M.Init()
 		local c = char()
 		local root = c and c:FindFirstChild("HumanoidRootPart")
 
-		-- Проверка расстояния при фризе (авто-анфриз при отходе на 4-5м / 16 studs)
 		if isFrozen and root and freezeOriginPos then
 			if (root.Position - freezeOriginPos).Magnitude > FREEZE_MAX_DIST then
 				isFrozen = false
