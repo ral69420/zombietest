@@ -1,215 +1,122 @@
 --!nonstrict
 
 local Players = game:GetService("Players")
-
 local UserInputService = game:GetService("UserInputService")
-
 local RunService = game:GetService("RunService")
-
 local Workspace = game:GetService("Workspace")
 
-
-
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("LastWaveShared")
-
 local Remotes = require(Shared:WaitForChild("Remotes"))
-
 local Weapons = require(Shared:WaitForChild("WeaponTypes"))
-
 local WeaponAnimator = require(script.Parent.WeaponAnimator)
 
-
-
 local WeaponController = {}
-
 local player = Players.LocalPlayer
-
 local camera = Workspace.CurrentCamera
 
-
-
 local weaponState = nil
-
 local firing = false
-
 local lastFire = 0
 
-
-
 function WeaponController.GetState()
-
 	return weaponState
-
 end
-
-
 
 local function aimDirection(): Vector3
-
 	local vp = camera.ViewportSize
-
 	local ray = camera:ViewportPointToRay(vp.X * 0.5, vp.Y * 0.5)
-
 	return ray.Direction.Unit
-
 end
-
 local ClientState = require(script.Parent.ClientState)
 
-
-
 function WeaponController.Fire()
-
 	if ClientState.IsUILocked() then return end
-
 	local char = player.Character
-
 	if not char or char:GetAttribute("Role") ~= "Survivor" then return end
-
 	if char:GetAttribute("Downed") then return end
-
+	if char:GetAttribute("HammerEquipped") == true then return end
 	if not weaponState or weaponState.Empty or weaponState.Reloading then return end
 
-
-
 	local def = weaponState.Def
-
 	if not def then return end
 
-
-
 	if (weaponState.Ammo or 0) <= 0 then
-
 		Remotes.ReloadRequest:FireServer()
-
 		return
-
 	end
 
-
-
 	local now = os.clock()
-
 	if now - lastFire < def.FireRate then return end
-
 	lastFire = now
 
-
-
 	-- предиктивно: анимация и вспышка мгновенно, урон считает сервер
-
 	weaponState.Ammo -= 1
-
 	WeaponAnimator.PlayFireLocal()
-
 	Remotes.WeaponFireRequest:FireServer(aimDirection())
-
 end
-
-
 
 function WeaponController.Reload()
-
 	Remotes.ReloadRequest:FireServer()
-
 end
-
-
 
 function WeaponController.Switch(slot: string)
-
 	Remotes.SwitchWeaponRequest:FireServer(slot)
-
 end
-
-
 
 function WeaponController.SwitchNext()
-
+	local char = player.Character
+	if char and char:GetAttribute("HammerEquipped") == true then
+		WeaponController.Switch("Primary")
+		return
+	end
 	if not weaponState or not weaponState.Slots then return end
-
 	local target = if weaponState.Active == "Primary" then "Secondary" else "Primary"
-
 	if weaponState.Slots[target] then WeaponController.Switch(target) end
-
 end
-
-
 
 function WeaponController.Init()
-
 	Remotes.WeaponState.OnClientEvent:Connect(function(state)
-
 		weaponState = state
-
-		WeaponAnimator.OnWeaponChanged(state)
-
+		local char = player.Character
+		if not (char and char:GetAttribute("HammerEquipped") == true) then
+			WeaponAnimator.OnWeaponChanged(state)
+		end
 	end)
-
-
 
 	UserInputService.InputBegan:Connect(function(input, processed)
-
 		if processed then return end
-
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-
 			local char = player.Character
-
-			if char and char:GetAttribute("Role") == "Survivor" then
-
+			if char and char:GetAttribute("Role") == "Survivor" and char:GetAttribute("HammerEquipped") ~= true then
 				firing = true
-
 				WeaponController.Fire()
-
 			end
-
 		elseif input.KeyCode == Enum.KeyCode.R then
-
 			WeaponController.Reload()
-
 		elseif input.KeyCode == Enum.KeyCode.One then
-
 			WeaponController.Switch("Primary")
-
 		elseif input.KeyCode == Enum.KeyCode.Two then
-
 			WeaponController.Switch("Secondary")
-
+		elseif input.KeyCode == Enum.KeyCode.Three then
+			WeaponController.Switch("Hammer")
 		elseif input.KeyCode == Enum.KeyCode.X then
-
 			WeaponController.SwitchNext()
-
 		end
-
 	end)
-
-
 
 	UserInputService.InputEnded:Connect(function(input)
-
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-
 			firing = false
-
 		end
-
 	end)
-
-
 
 	RunService.Heartbeat:Connect(function()
-
 		if not firing or not weaponState then return end
-
+		local char = player.Character
+		if char and char:GetAttribute("HammerEquipped") == true then return end
 		local def = weaponState.Def
-
 		if def and def.Auto then WeaponController.Fire() end
-
 	end)
-
 end
-
-
 
 return WeaponController
