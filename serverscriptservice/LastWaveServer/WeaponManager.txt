@@ -251,7 +251,7 @@ local function castPellet(char: Model, origin: Vector3, aim: Vector3, def)
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
 		params.FilterDescendantsInstances = filter
-		params.RespectCanCollide = true
+		params.RespectCanCollide = false
 		local res = Workspace:Raycast(pos, aim * remaining, params)
 		if not res then return pos + aim * remaining, nil end
 

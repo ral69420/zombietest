@@ -109,13 +109,13 @@ local function solve()
 		maxDist = B.MaxPlaceDistance,
 		size = Placement.SizeOf(carried),
 		yaw = yaw,
+		height = height,
 		ignore = { char(), carried }
 	})
 	reason = r
 	if cf then
-		local targetCF = cf * CFrame.new(0, height, 0)
 		setHighlight(carried, true)
-		return targetCF
+		return cf
 	else
 		setHighlight(carried, false)
 		return nil
@@ -184,7 +184,7 @@ end
 
 function M.TryPlace()
 	if carried and not ClientState.IsUILocked() then
-		Remotes.PlaceFreeRequest:FireServer(aim(), yaw)
+		Remotes.PlaceFreeRequest:FireServer(aim(), yaw, height)
 		isFrozen = false
 		frozenCF = nil
 	end
@@ -270,13 +270,25 @@ local function onCarriedChanged(p)
 end
 
 local function watch(c)
-	local ref = c:WaitForChild("CarriedProp", 10)
-	if not ref then return end
-	ref.Changed:Connect(function()
-		onCarriedChanged(ref.Value)
-	end)
-	if ref.Value then
-		onCarriedChanged(ref.Value)
+	local function bindRef(ref)
+		ref.Changed:Connect(function()
+			onCarriedChanged(ref.Value)
+		end)
+		if ref.Value then
+			onCarriedChanged(ref.Value)
+		end
+	end
+	local ref = c:FindFirstChild("CarriedProp")
+	if ref then
+		bindRef(ref)
+	else
+		local conn
+		conn = c.ChildAdded:Connect(function(child)
+			if child.Name == "CarriedProp" and child:IsA("ObjectValue") then
+				conn:Disconnect()
+				bindRef(child)
+			end
+		end)
 	end
 end
 
