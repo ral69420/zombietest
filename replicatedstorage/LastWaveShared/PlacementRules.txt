@@ -13,8 +13,6 @@ local PlacementRules = {}
 local B = Config.BARRICADE
 local TAG_PROP = "BarricadeProp"
 
--- Размер пропа берём ОДИН раз при регистрации и кладём в атрибут.
--- Так клиент и сервер считают по одинаковым числам.
 function PlacementRules.SizeOf(prop: Instance): Vector3
 	local cached = prop:GetAttribute("PropSize")
 	if typeof(cached) == "Vector3" then return cached end
@@ -32,8 +30,6 @@ function PlacementRules.SnapYaw(yaw: number): number
 	return math.floor(yaw / step + 0.5) * step
 end
 
--- Кого считаем препятствием: другие баррикады и живые тела.
--- Стены и пол НЕ мешают: касание опоры это норма, а не пересечение.
 function PlacementRules.Blockers(ignore: { Instance }?): { Instance }
 	local skip = {}
 	if ignore then
@@ -55,9 +51,7 @@ function PlacementRules.Blockers(ignore: { Instance }?): { Instance }
 	return out
 end
 
--- ctx = { origin: Vector3, dir: Vector3, maxDist: number, size: Vector3,
---         yaw: number, ignore: {Instance} }
--- Возвращает CFrame (по ЦЕНТРУ bounding box) или nil + причину для игрока.
+-- Только пол, стены, потолок. Никаких подвисаний в пустоте.
 function PlacementRules.Solve(ctx): (CFrame?, string?)
 	local ignore = ctx.ignore or {}
 
@@ -81,39 +75,32 @@ function PlacementRules.Solve(ctx): (CFrame?, string?)
 	local normal = hit.Normal
 	local yaw = ctx.yaw or 0
 	local pos = hit.Position
+	local upDot = normal:Dot(Vector3.yAxis)
 	local isWall = math.abs(normal.Y) < 0.5
+	local isCeiling = upDot < -0.75
+	local isFloor = upDot > 0.75
 
 	if isWall then
-		-- Прилипание к стене: баррикада встаёт вплотную и лицом от стены.
-		if B.AlignToWall then
-			yaw = math.atan2(normal.X, normal.Z)
-		end
+		if B.AllowWall == false then return nil, "Только пол или потолок" end
+		if B.AlignToWall then yaw = math.atan2(normal.X, normal.Z) end
 		local flat = Vector3.new(normal.X, 0, normal.Z)
 		if flat.Magnitude > 0.05 then
 			pos = pos + flat.Unit * (size.Z * 0.5 + 0.05)
 		end
-	else
+	elseif isCeiling then
+		if B.AllowCeiling == false then return nil, "К потолку нельзя" end
+		pos = pos + Vector3.new(0, -(size.Y * 0.5 + 0.02), 0)
+	elseif isFloor then
+		if B.AllowFloor == false then return nil, "На пол нельзя" end
 		local slope = math.deg(math.acos(math.clamp(normal.Y, -1, 1)))
-		if slope > B.MaxSlopeDeg then
-			return nil, "Слишком крутой склон"
-		end
+		if slope > B.MaxSlopeDeg then return nil, "Слишком крутой склон" end
+		pos = pos + Vector3.new(0, size.Y * 0.5 + 0.02, 0)
+	else
+		return nil, "Только пол, стены или потолок"
 	end
 
 	yaw = PlacementRules.SnapYaw(yaw)
-
-	-- ГЛАВНОЕ ПРАВИЛО: под баррикадой обязана быть опора.
-	local from = pos + Vector3.new(0, size.Y * 0.5 + 0.5, 0)
-	local support = Workspace:Raycast(
-		from,
-		Vector3.new(0, -(size.Y + B.GroundMaxGap + 0.5), 0),
-		rp
-	)
-	if not support then
-		return nil, "Нет опоры: в воздухе не ставится"
-	end
-
-	local cf = CFrame.new(support.Position + Vector3.new(0, size.Y * 0.5 + 0.02, 0))
-		* CFrame.Angles(0, yaw, 0)
+	local cf = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
 
 	local op = OverlapParams.new()
 	op.FilterType = Enum.RaycastFilterType.Include
@@ -126,8 +113,6 @@ function PlacementRules.Solve(ctx): (CFrame?, string?)
 	return cf, nil
 end
 
--- Ставим модель ПО ЦЕНТРУ bounding box, а не по пивоту.
--- Из-за пивота модели раньше вставали криво и наполовину в полу.
 function PlacementRules.ApplyCenter(prop: Instance, cf: CFrame)
 	if prop:IsA("BasePart") then
 		prop.CFrame = cf
@@ -139,8 +124,6 @@ function PlacementRules.ApplyCenter(prop: Instance, cf: CFrame)
 	prop:PivotTo(cf * offset)
 end
 
--- Дистанция до ближайшей точки габарита, а не до центра.
--- Лечит "не могу поднять шкаф, стоя вплотную".
 function PlacementRules.ReachDistance(from: Vector3, prop: Instance): number
 	local cf, size
 	if prop:IsA("Model") then

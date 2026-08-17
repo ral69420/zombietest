@@ -12,29 +12,28 @@ local function part(p)if p:IsA("BasePart")then return p end;return p:IsA("Model"
 local function each(p,fn)if p:IsA("BasePart")then fn(p)end;for _,x in p:GetDescendants()do if x:IsA("BasePart")then fn(x)end end end
 local function anchor(p,v)each(p,function(x)x.Anchored=v end)end
 local function collide(p,v)each(p,function(x)x.CanCollide=v end)end
--- Хлам на пропе живёт своей жизнью в PropClutter, его физику тут не трогаем.
 local function isClutter(x)if CollectionService:HasTag(x,CL.TagName)or x:GetAttribute("Clutter")==true then return true end;local c=x.Parent;while c and c~=Workspace do if c.Name==CL.FolderName then return true end;c=c.Parent end;return false end
 local function body(p,fn)each(p,function(x)if not isClutter(x)then fn(x)end end)end
 local function defOf(p)local s=state[p];return s and PropTypes[s.PropType]or nil end
--- Проп НЕ установлен -> коллизия у него ВСЕГДА включена.
--- Кого именно он блокирует, решает WeightClass из PropTypes: Heavy/Meme стоят стеной, мелочь тела не держит.
+-- Теперь loose-пропы не заякорены: игрок реально может их ТОЛКАТЬ телом.
+-- При этом они спавнятся/дропаются на пол через settle, а не висят в воздухе.
 local function loose(p)
  local d=defOf(p);local w=d and d.WeightClass or"Medium";local g=(Config.LOOSE_COLLISION[w]==true)and Config.GROUP_LOOSE_HEAVY or Config.GROUP_LOOSE_LIGHT
- body(p,function(x)x.Anchored=true;x.CanCollide=true;x.CanQuery=true;x.CollisionGroup=g;if d then x.CustomPhysicalProperties=PhysicalProperties.new(d.Density,d.Friction,d.Elasticity,1,1)end end)
+ body(p,function(x)x.Anchored=false;x.Massless=false;x.CanCollide=true;x.CanQuery=true;x.CollisionGroup=g;if d then x.CustomPhysicalProperties=PhysicalProperties.new(d.Density,d.Friction,d.Elasticity,1,1)end end)
 end
 local function ready(pl)local c=pl.Character;local h=c and c:FindFirstChildWhichIsA("Humanoid");return c and c:GetAttribute("Role")=="Survivor"and not c:GetAttribute("Downed")and h and h.Health>0 end
 local function reach(pl,p,d)local r=AntiCheat.GetRoot(pl);return r and Placement.ReachDistance(r.Position,p)<=d end
 local function mark(pl,p)local c=pl.Character;if not c then return end;local v=c:FindFirstChild("CarriedProp")or Instance.new("ObjectValue");v.Name="CarriedProp";v.Parent=c;v.Value=p end
-local function sync(p)local s=state[p];if not s then return end;p:SetAttribute("HP",math.floor(s.HP));p:SetAttribute("MaxHP",math.floor(s.MaxHP));p:SetAttribute("IsNailed",s.Nailed);p:SetAttribute("Infected",s.Infected);p:SetAttribute("PlacedBy",s.PlacedBy)end
+local function sync(p)local s=state[p];if not s then return end;p:SetAttribute("HP",math.floor(s.HP));p:SetAttribute("MaxHP",math.floor(s.MaxHP));p:SetAttribute("BaseMaxHP",math.floor(s.BaseMaxHP));p:SetAttribute("IsNailed",s.Nailed);p:SetAttribute("Infected",s.Infected);p:SetAttribute("PlacedBy",s.PlacedBy)end
 local function kit(pl)local c=pl.Character;return Kits[c and c:GetAttribute("Kit")or"Builder"]or Kits.Builder end
-local function settle(p)local s=Placement.SizeOf(p);local cf=p:IsA("Model")and p:GetBoundingBox()or p.CFrame;local rp=RaycastParams.new();rp.FilterType=Enum.RaycastFilterType.Exclude;rp.FilterDescendantsInstances={p};local h=Workspace:Raycast(cf.Position+Vector3.new(0,2,0),Vector3.new(0,-200,0),rp);if h then Placement.ApplyCenter(p,CFrame.new(h.Position+Vector3.new(0,s.Y*.5+.02,0))*CFrame.Angles(0,math.atan2(-cf.LookVector.X,-cf.LookVector.Z),0))end end
-function M.RegisterProp(p)local q=part(p);if not q then return end;local k=tostring(p:GetAttribute("PropType")or p.Name);local d=PropTypes[k]or PropTypes.WoodCrate;if not PropTypes[k]then k="WoodCrate"end;local s=p:IsA("Model")and select(2,p:GetBoundingBox())or q.Size;p:SetAttribute("PropType",k);p:SetAttribute("PropSize",s);state[p]={HP=d.MaxHP,MaxHP=d.MaxHP,BaseMaxHP=d.MaxHP,Nailed=false,Infected=false,PlacedBy=0,PropType=k,Size=s};CollectionService:AddTag(p,"BarricadeProp");PhysicsSetup.SetPropGroup(p,false);Clutter.Register(p);loose(p);settle(p);sync(p)end
+-- Спавн и дроп возвращаем к старой логике: предмет остаётся там, где его положил маппер/спавнер, только падает на ближайший пол.
+local function settle(p)local s=Placement.SizeOf(p);local cf=p:IsA("Model")and p:GetBoundingBox()or p.CFrame;local rp=RaycastParams.new();rp.FilterType=Enum.RaycastFilterType.Exclude;rp.FilterDescendantsInstances={p};local h=Workspace:Raycast(cf.Position+Vector3.new(0,2,0),Vector3.new(0,-200,0),rp);if h and h.Normal.Y>0.5 then Placement.ApplyCenter(p,CFrame.new(h.Position+Vector3.new(0,s.Y*.5+.02,0))*CFrame.Angles(0,math.atan2(-cf.LookVector.X,-cf.LookVector.Z),0))end end
+function M.RegisterProp(p)local q=part(p);if not q then return end;local k=tostring(p:GetAttribute("PropType")or p.Name);local d=PropTypes[k]or PropTypes.WoodCrate;if not PropTypes[k]then k="WoodCrate"end;local s=p:IsA("Model")and select(2,p:GetBoundingBox())or q.Size;p:SetAttribute("PropType",k);p:SetAttribute("PropSize",s);state[p]={HP=d.MaxHP,MaxHP=d.MaxHP,BaseMaxHP=d.MaxHP,Nailed=false,Infected=false,PlacedBy=0,PropType=k,Size=s};CollectionService:AddTag(p,"BarricadeProp");Clutter.Register(p);sync(p);settle(p);loose(p)end
 function M.RegisterSocket(s)if s:IsA("BasePart")then s.Anchored=true;s.CanCollide=false;s.Transparency=1 end end
 function M.GetFreeSockets()return{}end
 local function release(pl,keep)local c=carry[pl];if not c then return end;carry[pl]=nil;carrier[c.Prop]=nil;if c.Prop.Parent then c.Prop:SetAttribute("CarriedBy",nil);if not keep then loose(c.Prop)end end;if pl.Character then pl.Character:SetAttribute("CarryMultiplier",1)end;mark(pl,nil);return c end
 function M.TakeIntoHands(pl,p)if carry[pl]then return false end;local s=state[p];if not s or s.Nailed or carrier[p]then return false end;local d=PropTypes[s.PropType];carry[pl]={Prop=p,Def=d};carrier[p]=pl;anchor(p,true);collide(p,false);PhysicsSetup.SetPropGroup(p,true);p:SetAttribute("CarriedBy",pl.UserId);mark(pl,p);Clutter.Release(p);local c=pl.Character;c:SetAttribute("CarryMultiplier",math.clamp(d.CarrySpeedMultiplier+kit(pl).CarryBonus,.35,1));return true end
--- Проп выпадает из рук и падает на пол. Зовётся и с E, и когда убрали молоток.
-function M.ForceDrop(pl)local c=release(pl);if not c or not c.Prop.Parent then return end;local r=AntiCheat.GetRoot(pl);if r then Placement.ApplyCenter(c.Prop,CFrame.new(r.Position+r.CFrame.LookVector*4))end;loose(c.Prop);settle(c.Prop)end
+function M.ForceDrop(pl)local c=release(pl);if not c or not c.Prop.Parent then return end;local r=AntiCheat.GetRoot(pl);if r then Placement.ApplyCenter(c.Prop,CFrame.new(r.Position+r.CFrame.LookVector*4))end;settle(c.Prop);loose(c.Prop)end
 local function pickup(pl,p)
  if not Sanity.inst(p,"Instance")or not ready(pl)or carry[pl]then return end
  local Hammer=require(script.Parent.HammerManager);if not Hammer.IsEquipped(pl)then Remotes.Notify:FireClient(pl,"needHammer");return end
@@ -47,10 +46,8 @@ end
 function M.Repair(pl,p)if not ready(pl)or not Sanity.inst(p,"Instance")then return false end;local s=state[p];if not s or not s.Nailed or s.Infected or s.HP>=s.MaxHP or not reach(pl,p,H.Reach)then return false end;local now=os.clock();if(repairCd[pl]or 0)+H.RepairCooldown>now or not Economy.Spend(pl,H.RepairCost)then return false end;repairCd[pl]=now;local k=kit(pl);s.MaxHP=math.max(s.BaseMaxHP*H.MinMaxHPRatio,s.MaxHP-s.BaseMaxHP*H.DegradePerRepair);s.HP=math.clamp(s.HP+H.RepairAmount*k.RepairMultiplier,0,s.MaxHP);sync(p);Score.Award(pl,"PropRepaired");return true end
 function M.BeginDismantle(pl,p)if not ready(pl)or not Sanity.inst(p,"Instance")then return end;local s=state[p];if not s or not s.Nailed or not reach(pl,p,H.Reach)then return end;if H.OwnOnly and s.PlacedBy~=pl.UserId then return end;dismantle[pl]={Prop=p,Until=os.clock()+H.DismantleTime}end
 function M.CancelDismantle(pl)if dismantle[pl]then dismantle[pl]=nil;Remotes.ReviveProgress:FireClient(pl,0)end end
--- Сняли с гвоздей -> проп снова лежачий, значит снова получает коллизию по своему весу.
-local function unNail(p)local s=state[p];if not s or not s.Nailed then return end;s.Nailed=false;if s.PlacedBy~=0 then placedBy[s.PlacedBy]=math.max(0,(placedBy[s.PlacedBy]or 1)-1)end;s.PlacedBy=0;total=math.max(0,total-1);loose(p);sync(p)end
+local function unNail(p)local s=state[p];if not s or not s.Nailed then return end;s.Nailed=false;if s.PlacedBy~=0 then placedBy[s.PlacedBy]=math.max(0,(placedBy[s.PlacedBy]or 1)-1)end;s.PlacedBy=0;total=math.max(0,total-1);settle(p);loose(p);sync(p)end
 local function finish(pl,p)local s=state[p];if not s or not s.Nailed then return end;local d=PropTypes[s.PropType];unNail(p);if next(d.PlaceCost)and H.DismantleRefund>0 then local back={};for k,v in d.PlaceCost do back[k]=math.max(1,math.floor(v*H.DismantleRefund))end;Economy.Add(pl,back)end;if H.DismantleToHands and not carry[pl]then M.TakeIntoHands(pl,p)else settle(p)end;Remotes.Notify:FireClient(pl,"dismantled")end
--- Разбитый проп проходим: он больше не баррикада, а обломки на despawn.
 function M.DamageProp(p,n,src)local s=state[p];if not s or not s.Nailed or not Sanity.num(n,0,100000)then return end;s.HP=math.clamp(s.HP-n,0,s.MaxHP);sync(p);if s.HP>0 then return end;if src then Score.Award(src,"PropDestroyed")end;unNail(p);collide(p,false);task.delay(Config.PROP_DESPAWN_TIME,function()Clutter.Forget(p);if p.Parent then p:Destroy()end;state[p]=nil;carrier[p]=nil end)end
 function M.InfectProp(p,seconds)local s=state[p];if not s or not s.Nailed or s.Infected then return end;s.Infected=true;sync(p);task.spawn(function()local left=seconds;while left>0 and state[p]and state[p].Nailed do task.wait(1);left-=1;M.DamageProp(p,Config.SPIT_DOT,nil)end;if state[p]then state[p].Infected=false;sync(p)end end)end
 function M.IsNailedProp(p)return state[p]~=nil and state[p].Nailed end

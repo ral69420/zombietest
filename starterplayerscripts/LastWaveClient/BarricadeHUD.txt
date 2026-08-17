@@ -1,6 +1,4 @@
 --!nonstrict
--- Здоровье баррикад и подсказки. Всё рисуется локально: трафика ноль.
--- На полосе три зоны: текущее HP, сколько ещё можно вернуть молотком, и потерянный навсегда максимум.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
@@ -22,7 +20,7 @@ local function makeBillboard(): BillboardGui
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "BarricadeHP"
 	bb.Size = UDim2.fromOffset(HP.Width, HP.Height)
-	bb.AlwaysOnTop = false
+	bb.AlwaysOnTop = HP.AlwaysOnTop == true
 	bb.MaxDistance = HP.ShowDistance
 	bb.Enabled = false
 
@@ -51,7 +49,6 @@ local function makeBillboard(): BillboardGui
 	back.Parent = root
 	Instance.new("UICorner", back).CornerRadius = UDim.new(0, 3)
 
-	-- потолок ремонта: сколько ещё можно вернуть молотком
 	local cap = Instance.new("Frame")
 	cap.Name = "Cap"
 	cap.BackgroundColor3 = Color3.fromRGB(90, 130, 90)
@@ -121,7 +118,7 @@ function BarricadeHUD.Init()
 	local acc = 0
 	RunService.Heartbeat:Connect(function(dt)
 		acc += dt
-		if acc < 0.1 then return end   -- 10 Гц: полоски не стоят кадров
+		if acc < 0.1 then return end
 		acc = 0
 
 		local hint, reason = BarricadeController.GetHint()
@@ -137,8 +134,6 @@ function BarricadeHUD.Init()
 
 		local hasHammer = char:GetAttribute("HammerEquipped") == true
 		local target = BarricadeController.HammerTarget()
-
-		-- собираем ближайшие установленные баррикады
 		local near = {}
 		for _, prop in CollectionService:GetTagged("BarricadeProp") do
 			if prop:GetAttribute("IsNailed") ~= true then continue end
@@ -171,17 +166,11 @@ function BarricadeHUD.Init()
 			bb.Enabled = true
 
 			local r = bb.Root
-			r.Title.Text = tostring(prop:GetAttribute("PropType") or prop.Name)
-				.. (if prop == target then "   ◄" else "")
+			r.Title.Text = tostring(prop:GetAttribute("PropType") or prop.Name)..(if prop == target then "   ◄" else "")
 			r.Back.Fill.Size = UDim2.fromScale(math.clamp(hp / baseMax, 0, 1), 1)
 			r.Back.Cap.Size = UDim2.fromScale(math.clamp(maxHP / baseMax, 0, 1), 1)
-			r.Back.Fill.BackgroundColor3 = if prop:GetAttribute("Infected")
-				then Color3.fromRGB(180, 90, 220)
-				else Color3.fromRGB(90, 255, 130)
-			r.Text.Text = string.format(
-				"%d / %d   ремонт до %d",
-				hp, math.floor(maxHP), math.floor(maxHP)
-			)
+			r.Back.Fill.BackgroundColor3 = if prop:GetAttribute("Infected") then Color3.fromRGB(180, 90, 220) else Color3.fromRGB(90, 255, 130)
+			r.Text.Text = string.format("%d / %d   ремонт до %d", hp, math.floor(maxHP), math.floor(maxHP))
 		end
 	end)
 end

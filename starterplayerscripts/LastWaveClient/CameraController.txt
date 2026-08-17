@@ -1,13 +1,10 @@
 --!nonstrict
--- Вид от первого лица. ВАЖНО: при CameraType=Scriptable штатный TransparencyController
--- из PlayerModule не работает, поэтому свою голову, лицо и аксессуары прячем сами.
--- Плюс камера выносится немного вперёд из головы, иначе видно её изнутри.
 local Players=game:GetService("Players")
 local RunService=game:GetService("RunService")
 local UserInputService=game:GetService("UserInputService")
 local Workspace=game:GetService("Workspace")
 local CameraController={};local player=Players.LocalPlayer;local camera=Workspace.CurrentCamera;local ClientState=require(script.Parent.ClientState)
-local yaw,pitch=0,0;local renderConn:RBXScriptConnection?;local stateConn:RBXScriptConnection?;local descConn:RBXScriptConnection?;local BASE_FOV=90;local EYE_UP=.35;local EYE_FWD=.45
+local yaw,pitch=0,0;local renderConn:RBXScriptConnection?;local stateConn:RBXScriptConnection?;local descConn:RBXScriptConnection?;local BASE_FOV=90;local EYE_UP=.35;local EYE_FWD=.7
 local hidden={}
 local function watch(d)if d:IsA("BasePart")and(d.Name=="Head"or d:FindFirstAncestorWhichIsA("Accoutrement"))then hidden[d]=true elseif(d:IsA("Decal")or d:IsA("Texture"))and d.Parent and d.Parent.Name=="Head"then hidden[d]=true end end
 local function hide()for i in hidden do if i.Parent then i.LocalTransparencyModifier=1 else hidden[i]=nil end end end
