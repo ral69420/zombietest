@@ -9,7 +9,6 @@ local Placement = require(Shared.PlacementRules)
 local BarricadeController = require(script.Parent.BarricadeController)
 
 local BarricadeHUD = {}
-local HP = Config.BARRICADE.HP
 local localPlayer = Players.LocalPlayer
 
 local pool = {}
@@ -19,9 +18,10 @@ local reasonLabel: TextLabel
 local function makeBillboard(): BillboardGui
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "BarricadeHP"
-	bb.Size = UDim2.fromOffset(HP.Width, HP.Height)
+	bb.Size = UDim2.fromOffset(160, 45)
 	bb.AlwaysOnTop = true
-	bb.MaxDistance = HP.ShowDistance
+	bb.MaxDistance = 90
+	bb.ResetOnSpawn = false
 	bb.Enabled = false
 
 	local root = Instance.new("Frame")
@@ -69,7 +69,7 @@ local function makeBillboard(): BillboardGui
 	local text = Instance.new("TextLabel")
 	text.Name = "Text"
 	text.Size = UDim2.new(1, 0, 0, 12)
-	text.Position = UDim2.new(0, 0, 0, 28)
+	text.Position = UDim2.new(0, 0, 0, 30)
 	text.BackgroundTransparency = 1
 	text.Font = Enum.Font.Gotham
 	text.TextSize = 11
@@ -80,13 +80,25 @@ local function makeBillboard(): BillboardGui
 	return bb
 end
 
+local function getCenterPart(prop: Instance): BasePart?
+	if prop:IsA("BasePart") then return prop end
+	if prop:IsA("Model") then
+		return prop.PrimaryPart or prop:FindFirstChildWhichIsA("BasePart")
+	end
+	return nil
+end
+
 local function build()
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "LastWaveBuildHUD"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 12
-	gui.Parent = localPlayer:WaitForChild("PlayerGui")
+	local playerGui = localPlayer:WaitForChild("PlayerGui")
+	local gui = playerGui:FindFirstChild("LastWaveBuildHUD")
+	if not gui then
+		gui = Instance.new("ScreenGui")
+		gui.Name = "LastWaveBuildHUD"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.DisplayOrder = 12
+		gui.Parent = playerGui
+	end
 
 	hintLabel = Instance.new("TextLabel")
 	hintLabel.Size = UDim2.new(1, 0, 0, 20)
@@ -107,23 +119,20 @@ local function build()
 	reasonLabel.TextColor3 = Config.BARRICADE.Ghost.InvalidColor
 	reasonLabel.Parent = gui
 
-	for _ = 1, HP.MaxBillboards do
-		table.insert(pool, makeBillboard())
+	for _ = 1, 25 do
+		local bb = makeBillboard()
+		bb.Parent = gui
+		table.insert(pool, bb)
 	end
 end
 
 function BarricadeHUD.Init()
 	build()
 
-	local acc = 0
-	RunService.Heartbeat:Connect(function(dt)
-		acc += dt
-		if acc < 0.1 then return end
-		acc = 0
-
+	RunService.RenderStepped:Connect(function()
 		local hint, reason = BarricadeController.GetHint()
-		hintLabel.Text = hint
-		reasonLabel.Text = reason or ""
+		if hintLabel then hintLabel.Text = hint end
+		if reasonLabel then reasonLabel.Text = reason or "" end
 
 		local char = localPlayer.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -132,19 +141,14 @@ function BarricadeHUD.Init()
 			return
 		end
 
-		local hasHammer = char:GetAttribute("HammerEquipped") == true
 		local target = BarricadeController.HammerTarget()
 		local near = {}
 		for _, prop in CollectionService:GetTagged("BarricadeProp") do
 			if prop:GetAttribute("IsNailed") ~= true then continue end
-			local part = if prop:IsA("BasePart") then prop else (prop:IsA("Model") and (prop.PrimaryPart or prop:FindFirstChildWhichIsA("BasePart")))
+			local part = getCenterPart(prop)
 			if not part then continue end
-			local d = Placement.ReachDistance(root.Position, prop)
-			if d > HP.ShowDistance then continue end
-			if HP.OnlyWithHammer and not hasHammer and prop ~= target then continue end
-			local hp = prop:GetAttribute("HP") or 0
-			local maxHP = prop:GetAttribute("MaxHP") or 1
-			if HP.HideFullHP and hp >= maxHP and prop ~= target then continue end
+			local d = (root.Position - part.Position).Magnitude
+			if d > 90 then continue end
 			table.insert(near, { prop = prop, part = part, d = d })
 		end
 		table.sort(near, function(a, b) return a.d < b.d end)
@@ -157,21 +161,21 @@ function BarricadeHUD.Init()
 				continue
 			end
 			local prop = entry.prop
-			local hp = prop:GetAttribute("HP") or 0
-			local maxHP = math.max(prop:GetAttribute("MaxHP") or 1, 1)
+			local hp = prop:GetAttribute("HP") or 1000
+			local maxHP = math.max(prop:GetAttribute("MaxHP") or hp, 1)
 			local baseMax = math.max(prop:GetAttribute("BaseMaxHP") or maxHP, 1)
 
 			bb.Adornee = entry.part
-			-- Размещаем ровно в центре объекта (в середине)
 			bb.StudsOffsetWorldSpace = Vector3.zero
 			bb.Enabled = true
 
 			local r = bb.Root
-			r.Title.Text = tostring(prop:GetAttribute("PropType") or prop.Name)..(if prop == target then "   ◄" else "")
+			local nameText = tostring(prop:GetAttribute("PropType") or prop.Name)
+			r.Title.Text = nameText .. (if prop == target then "  ◄" else "")
 			r.Back.Fill.Size = UDim2.fromScale(math.clamp(hp / baseMax, 0, 1), 1)
 			r.Back.Cap.Size = UDim2.fromScale(math.clamp(maxHP / baseMax, 0, 1), 1)
 			r.Back.Fill.BackgroundColor3 = if prop:GetAttribute("Infected") then Color3.fromRGB(180, 90, 220) else Color3.fromRGB(90, 255, 130)
-			r.Text.Text = string.format("%d / %d   ремонт до %d", hp, math.floor(maxHP), math.floor(maxHP))
+			r.Text.Text = string.format("%d / %d", math.floor(hp), math.floor(maxHP))
 		end
 	end)
 end
