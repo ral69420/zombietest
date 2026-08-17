@@ -4,7 +4,6 @@ local UIS = game:GetService("UserInputService")
 local Run = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local CS = game:GetService("CollectionService")
-local TweenService = game:GetService("TweenService")
 
 local Shared = game.ReplicatedStorage.LastWaveShared
 local Config = require(Shared.Config)
@@ -19,12 +18,19 @@ local H = Config.HAMMER
 local player = Players.LocalPlayer
 local camera = Workspace.CurrentCamera
 
-local carried, ghost, ghostHL, carryHL, ghostCF, hammerTarget = nil, nil, nil, nil, nil, nil
+local carried, carryHL, hammerTarget = nil, nil, nil
 local reason
 local yaw = 0
 local height = 0
 local lastSolve = 0
 local dismantleHeld = false
+
+-- Фриз-режим (Lock / Freeze)
+local isFrozen = false
+local frozenCF: CFrame? = nil
+local frozenAim: Vector3? = nil
+local freezeOriginPos: Vector3? = nil
+local FREEZE_MAX_DIST = 16 -- ~4-5 метров (в studs: 1 метр ~ 3.57 studs, 16 studs ~ 4.5м)
 
 local ROT_STEP = 15
 local HEIGHT_SPEED = 2
@@ -35,6 +41,7 @@ local function hammerEquipped() local c = char(); return c and c:GetAttribute("H
 local function head() local c = char(); local p = c and (c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart")); return p and p:IsA("BasePart") and p or nil end
 
 local function aim()
+	if isFrozen and frozenAim then return frozenAim end
 	local v = camera.ViewportSize
 	return camera:ViewportPointToRay(v.X * 0.5, v.Y * 0.5).Direction.Unit
 end
@@ -44,7 +51,7 @@ local function ray(dist)
 	if not h then return nil end
 	local p = RaycastParams.new()
 	p.FilterType = Enum.RaycastFilterType.Exclude
-	p.FilterDescendantsInstances = { char(), ghost }
+	p.FilterDescendantsInstances = { char(), carried }
 	local r = Workspace:Raycast(h.Position, aim() * dist, p)
 	return r and r.Instance
 end
@@ -71,98 +78,89 @@ local function nearest(dist, nailed)
 	return best
 end
 
-local function clearGhost()
-	if ghost then ghost:Destroy() end
-	ghost = nil
-	ghostHL = nil
-	ghostCF = nil
-end
-
-local function color(c)
-	if ghostHL then
-		ghostHL.OutlineColor = c
-		ghostHL.FillColor = c
+local function setHighlight(p: Instance?, valid: boolean)
+	if not p then
+		if carryHL then carryHL:Destroy(); carryHL = nil end
+		return
 	end
-	if carryHL then
-		carryHL.OutlineColor = c
+	if not carryHL or carryHL.Adornee ~= p then
+		if carryHL then carryHL:Destroy() end
+		local h = Instance.new("Highlight")
+		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		h.FillTransparency = 0.8
+		h.OutlineTransparency = 0
+		h.Adornee = p
+		h.Parent = p
+		carryHL = h
 	end
-end
-
-local function makeGhost(p)
-	clearGhost()
-	local ok, g = pcall(function() return p:Clone() end)
-	if not ok or not g then return end
-	for _, x in g:GetDescendants() do
-		if x:IsA("BasePart") then
-			x.Anchored = true
-			x.CanCollide = false
-			x.CanQuery = false
-			x.CanTouch = false
-			x.Transparency = G.PreviewTransparency
-			x.Material = Enum.Material.SmoothPlastic
-		elseif x:IsA("Script") or x:IsA("LocalScript") or x:IsA("Sound") then
-			x:Destroy()
-		end
-	end
-	local h = Instance.new("Highlight")
-	h.FillColor = G.ValidColor
-	h.OutlineColor = G.ValidColor
-	h.FillTransparency = G.FillTransparency
-	h.OutlineTransparency = G.OutlineTransparency
-	h.DepthMode = Enum.HighlightDepthMode.Occluded
-	h.Adornee = g
-	h.Parent = g
-	ghostHL = h
-	g.Name = "BarricadeGhost"
-	g.Parent = Workspace
-	ghost = g
-end
-
-local function carryVisual(p)
-	if carryHL then carryHL:Destroy(); carryHL = nil end
-	if not p then return end
-	local h = Instance.new("Highlight")
-	h.FillColor = G.ValidColor
-	h.OutlineColor = G.ValidColor
-	h.FillTransparency = 0.7
-	h.OutlineTransparency = 0
-	h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	h.Adornee = p
-	h.Parent = p
-	carryHL = h
+	local col = if valid then G.ValidColor else G.InvalidColor
+	carryHL.FillColor = col
+	carryHL.OutlineColor = col
 end
 
 local function solve()
-	if not carried or not ghost then return end
+	if not carried then return end
 	local h = head()
 	if not h then return end
+
 	local cf, r = Placement.Solve({
 		origin = h.Position,
 		dir = aim(),
 		maxDist = B.MaxPlaceDistance,
 		size = Placement.SizeOf(carried),
 		yaw = yaw,
-		ignore = { char(), carried, ghost }
+		ignore = { char(), carried }
 	})
 	reason = r
 	if cf then
-		ghostCF = cf * CFrame.new(0, height, 0)
-		color(G.ValidColor)
+		local targetCF = cf * CFrame.new(0, height, 0)
+		setHighlight(carried, true)
+		return targetCF
 	else
-		ghostCF = nil
-		color(G.InvalidColor)
+		setHighlight(carried, false)
+		return nil
 	end
 end
 
 function M.GetHint()
 	local c = char()
 	if c and c:GetAttribute("Role") == "Zombie" then return "ЛКМ бить · R способность", nil end
-	if carried then return "ЛКМ / Y поставить · R / Shift+R поворот · Колёсико высота · E бросить", reason end
+	if carried then
+		if isFrozen then
+			return "🔒 [SHIFT] ЗАФИКСИРОВАНО · ЛКМ/Y поставить · R вращать · SHIFT снять фриз", reason
+		else
+			return "ЛКМ / Y поставить · [SHIFT] зафиксировать · R поворот · E бросить", reason
+		end
+	end
 	if hammerEquipped() then return "ЛКМ чинить · ПКМ удерживать для снятия", nil end
-	return "E взять предмет · [3] молоток для ремонта", nil end
+	return "E взять предмет · [3] молоток для ремонта", nil
+end
 
 function M.IsCarrying() return carried ~= nil end
+function M.IsFrozen() return isFrozen end
 function M.HammerTarget() return hammerTarget end
+
+function M.ToggleFreeze()
+	if not carried then return end
+	local c = char()
+	local r = c and c:FindFirstChild("HumanoidRootPart")
+	if not r then return end
+
+	if not isFrozen then
+		local solved = solve()
+		if solved then
+			isFrozen = true
+			frozenCF = solved
+			frozenAim = aim()
+			freezeOriginPos = r.Position
+		end
+	else
+		isFrozen = false
+		frozenCF = nil
+		frozenAim = nil
+		freezeOriginPos = nil
+	end
+end
 
 function M.TryPickupOrDrop()
 	if ClientState.IsUILocked() then return end
@@ -170,6 +168,8 @@ function M.TryPickupOrDrop()
 	local carriedVal = c and c:FindFirstChild("CarriedProp")
 	local actualCarried = carried or (carriedVal and carriedVal.Value)
 	if actualCarried then
+		isFrozen = false
+		frozenCF = nil
 		Remotes.DropRequest:FireServer()
 		return
 	end
@@ -180,6 +180,8 @@ end
 function M.TryPlace()
 	if carried and not ClientState.IsUILocked() then
 		Remotes.PlaceFreeRequest:FireServer(aim(), yaw)
+		isFrozen = false
+		frozenCF = nil
 	end
 end
 
@@ -188,11 +190,19 @@ function M.Rotate(d, isShift)
 	if isShift then step = -step end
 	yaw = (yaw + math.rad(step)) % (math.pi * 2)
 	lastSolve = 0
+	if isFrozen and frozenCF then
+		isFrozen = false
+		M.ToggleFreeze()
+	end
 end
 
 function M.AdjustHeight(delta)
 	height = math.clamp(height + delta, -MAX_HEIGHT, MAX_HEIGHT)
 	lastSolve = 0
+	if isFrozen and frozenCF then
+		isFrozen = false
+		M.ToggleFreeze()
+	end
 end
 
 function M.HammerHit()
@@ -237,29 +247,29 @@ function M.Ability()
 	end
 end
 
+local function onCarriedChanged(p)
+	if p == carried then return end
+	if carried then setHighlight(nil, false) end
+	carried = p
+	yaw = 0
+	height = 0
+	isFrozen = false
+	frozenCF = nil
+	frozenAim = nil
+	freezeOriginPos = nil
+	if p then
+		setHighlight(p, true)
+	end
+end
+
 local function watch(c)
 	local ref = c:WaitForChild("CarriedProp", 10)
 	if not ref then return end
 	ref.Changed:Connect(function()
-		local p = ref.Value
-		if p == carried then return end
-		if carried then carryVisual(nil) end
-		carried = p
-		if p then
-			yaw = 0
-			height = 0
-			carryVisual(p)
-			makeGhost(p)
-		else
-			clearGhost()
-		end
+		onCarriedChanged(ref.Value)
 	end)
 	if ref.Value then
-		carried = ref.Value
-		yaw = 0
-		height = 0
-		carryVisual(carried)
-		makeGhost(carried)
+		onCarriedChanged(ref.Value)
 	end
 end
 
@@ -268,8 +278,9 @@ function M.Init()
 	player.CharacterAdded:Connect(function(c)
 		carried = nil
 		height = 0
-		clearGhost()
-		carryVisual(nil)
+		isFrozen = false
+		frozenCF = nil
+		setHighlight(nil, false)
 		task.spawn(watch, c)
 	end)
 
@@ -280,18 +291,19 @@ function M.Init()
 
 		if i.KeyCode == Enum.KeyCode.E and role == "Survivor" then
 			M.TryPickupOrDrop()
+		elseif (i.KeyCode == Enum.KeyCode.LeftShift or i.KeyCode == Enum.KeyCode.RightShift) and role == "Survivor" and carried then
+			M.ToggleFreeze()
 		elseif i.KeyCode == Enum.KeyCode.Y and role == "Survivor" and carried then
 			M.TryPlace()
 		elseif i.KeyCode == Enum.KeyCode.R then
 			if carried then
-				local isShift = UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift)
-				M.Rotate(1, isShift)
+				M.Rotate(1, false)
 			elseif role == "Zombie" then
 				M.Ability()
 			end
 		elseif i.KeyCode == Enum.KeyCode.T then
 			if carried then
-				M.Rotate(2, false)
+				M.Rotate(-1, false)
 			end
 		elseif i.KeyCode == Enum.KeyCode.Q then
 			M.TryInteract()
@@ -324,24 +336,43 @@ function M.Init()
 	end)
 
 	Run.RenderStepped:Connect(function(dt)
-		local now = os.clock()
-		if carried and ghost and now - lastSolve > 1 / math.max(G.SolveHz, 1) then
-			lastSolve = now
-			pcall(solve)
-		end
+		local c = char()
+		local root = c and c:FindFirstChild("HumanoidRootPart")
 
-		if ghost and ghostCF then
-			local cur = ghost:IsA("Model") and ghost:GetPivot() or ghost.CFrame
-			local target = ghostCF
-			local a = math.min(dt * G.LerpSpeed, 1)
-			if ghost:IsA("Model") then
-				ghost:PivotTo(cur:Lerp(target, a))
-			else
-				ghost.CFrame = cur:Lerp(target, a)
+		-- Проверка расстояния при фризе (авто-анфриз при отходе на 4-5м / 16 studs)
+		if isFrozen and root and freezeOriginPos then
+			if (root.Position - freezeOriginPos).Magnitude > FREEZE_MAX_DIST then
+				isFrozen = false
+				frozenCF = nil
+				frozenAim = nil
+				freezeOriginPos = nil
 			end
 		end
 
-		local c = char()
+		if carried then
+			local now = os.clock()
+			local targetCF: CFrame? = nil
+
+			if isFrozen and frozenCF then
+				targetCF = frozenCF
+			else
+				if now - lastSolve > 1 / math.max(G.SolveHz, 1) then
+					lastSolve = now
+					targetCF = solve()
+				end
+			end
+
+			if targetCF then
+				local a = math.min(dt * G.LerpSpeed, 1)
+				if carried:IsA("Model") then
+					local cur = carried:GetPivot()
+					carried:PivotTo(cur:Lerp(targetCF, a))
+				elseif carried:IsA("BasePart") then
+					carried.CFrame = carried.CFrame:Lerp(targetCF, a)
+				end
+			end
+		end
+
 		if hammerEquipped() and not carried then
 			hammerTarget = tagged(ray(H.Reach), "BarricadeProp") or nearest(H.Reach, true)
 		else
