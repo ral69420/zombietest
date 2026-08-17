@@ -22,6 +22,7 @@ local ScoreManager   = require(S.ScoreManager)
 local BarricadeMgr   = require(S.BarricadeManager)
 local ZombieRig      = require(S.ZombieRig)
 local WeaponManager  = require(S.WeaponManager)
+local HammerManager  = require(S.HammerManager)
 local PlayerManager  = require(S.PlayerManager)
 local CombatManager  = require(S.CombatManager)
 local ZombieManager  = require(S.ZombieManager)
@@ -146,6 +147,7 @@ local ORDER = {
 	{ "ScoreManager", ScoreManager },
 	{ "BarricadeMgr", BarricadeMgr },
 	{ "WeaponManager", WeaponManager },
+	{ "HammerManager", HammerManager },
 	{ "PlayerManager", PlayerManager },
 	{ "CombatManager", CombatManager },
 	{ "ZombieManager", ZombieManager },

@@ -44,7 +44,7 @@ local function onAttack(player: Player, target: any)
 		local tRoot = model:FindFirstChild("HumanoidRootPart")
 		if not tRoot then return end
 		if (tRoot.Position - root.Position).Magnitude > range then
-			AntiCheat.Flag(player, "attack range", 1); return
+			return
 		end
 		if not AntiCheat.HasLineOfSight(player, tRoot, { model }) then return end
 		lastAttack[player] = now
@@ -66,7 +66,8 @@ local function onAttack(player: Player, target: any)
 		return
 	end
 
-	AntiCheat.Flag(player, "attack: невалидная цель " .. target.Name, 2)
+	-- Промах по стене/пустому месту не является читом: клиентский луч может устареть.
+	return
 end
 
 local function onAbility(player: Player, arg: any)
