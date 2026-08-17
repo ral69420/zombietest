@@ -86,17 +86,21 @@ function PlacementRules.Solve(ctx): (CFrame?, string?)
 		cf = CFrame.new(airPos) * CFrame.Angles(0, yaw, 0) * CFrame.new(0, height, 0)
 	end
 
-	-- Overlap check
+	-- Overlap check. Values <= 1 are scale factors, values > 1 are stud margins.
 	local overlapParams = OverlapParams.new()
 	overlapParams.FilterType = Enum.RaycastFilterType.Include
 	overlapParams.FilterDescendantsInstances = PlacementRules.Blockers(ignore)
 	overlapParams.CollisionGroup = "Default"
 
 	local shrink = B.OverlapShrink or 0.05
-	local checkSize = Vector3.new(
+	local checkSize = if shrink > 1 then Vector3.new(
 		math.max(0.1, size.X - shrink * 2),
 		math.max(0.1, size.Y - shrink * 2),
 		math.max(0.1, size.Z - shrink * 2)
+	) else Vector3.new(
+		math.max(0.1, size.X * shrink),
+		math.max(0.1, size.Y * shrink),
+		math.max(0.1, size.Z * shrink)
 	)
 
 	local overlaps = Workspace:GetPartBoundsInBox(cf, checkSize, overlapParams)
