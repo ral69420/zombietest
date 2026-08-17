@@ -4,6 +4,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
+local StarterGui = game:GetService("StarterGui")
 local Shared = game.ReplicatedStorage.LastWaveShared
 local Config = require(Shared.Config)
 local Remotes = require(Shared.Remotes)
@@ -63,17 +64,27 @@ local function updateCounters()
 end
 local function updateInventory(ws)
     if not inventorySlots then return end
+    local char=localPlayer.Character
+    local isHammer=char and char:GetAttribute("HammerEquipped")==true
     local primary=(ws and ws.Slots and ws.Slots.Primary and ws.Slots.Primary.Def and ws.Slots.Primary.Def.Name) or "EMPTY"
     local secondary=(ws and ws.Slots and ws.Slots.Secondary and ws.Slots.Secondary.Def and ws.Slots.Secondary.Def.Name) or "EMPTY"
     inventorySlots[1].Text=string.format("%s\n[1]",primary:sub(1,9));inventorySlots[2].Text=string.format("%s\n[2]",secondary:sub(1,9));inventorySlots[3].Text="HAMMER\n[3]"
-    for i,slot in ipairs(inventorySlots) do slot.BackgroundColor3=((ws and ((i==1 and ws.Active=="Primary") or (i==2 and ws.Active=="Secondary"))) and C.line) or C.slot end
+    for i,slot in ipairs(inventorySlots) do
+        if isHammer then
+            slot.BackgroundColor3=(i==3 and C.line) or C.slot
+        else
+            slot.BackgroundColor3=((ws and ((i==1 and ws.Active=="Primary") or (i==2 and ws.Active=="Secondary"))) and C.line) or C.slot
+        end
+    end
 end
 local function updateTab()
     local s,z=countRoles();local kills=0;local char=localPlayer.Character;local k=char and char:FindFirstChild("Kills");if k then kills=k.Value end
     tabContent.Text=string.format("SURVIVORS     %02d\nZOMBIES       %02d\n\nYOUR KILLS    %02d\n\nPHASE         %s\nWAVE          %d / %d",s,z,kills,PHASE_TEXT[matchState.Phase] or tostring(matchState.Phase),matchState.Wave or 0,Config.TOTAL_WAVES)
 end
 function HUDController.Init()
-    build();task.spawn(function()local ok,s=pcall(function()return Remotes.GetGameState:InvokeServer()end);if ok and s then matchState=s end end)
+    build()
+    pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false) end)
+    task.spawn(function()local ok,s=pcall(function()return Remotes.GetGameState:InvokeServer()end);if ok and s then matchState=s end end)
     Remotes.StateChanged.OnClientEvent:Connect(function(s)matchState=s end);Remotes.ResourcesChanged.OnClientEvent:Connect(function(r)resources=r or {} end)
     Remotes.Notify.OnClientEvent:Connect(function(kind,arg)local text=NOTIFY_TEXT[kind];if kind=="sectorCollapse" then text="Сектор рушится! Отходим!" elseif kind=="emergencyButton" then text=tostring(arg).." нажал аварийную кнопку!" elseif kind=="purchased" then text="Куплено" elseif kind=="kitSet" then text="Набор: "..tostring(arg) elseif kind=="classSet" then text="Класс зомби: "..tostring(arg) elseif kind=="classLocked" then text=tostring(arg).." ещё закрыт" elseif kind=="placeFail" then text=tostring(arg) end;if text then notify(text)end end)
     Remotes.PlayerInfected.OnClientEvent:Connect(function(p,class)if p==localPlayer then notify("Ты стал зомби ("..tostring(class)..")")else notify(p.DisplayName.." превратился в зомби")end end);Remotes.PlayerDowned.OnClientEvent:Connect(function(p)if p==localPlayer then downedFrame.Visible=true end end);Remotes.PlayerRevived.OnClientEvent:Connect(function(p,medic)if p==localPlayer then downedFrame.Visible=false end;notify(medic.DisplayName.." спас "..p.DisplayName)end);Remotes.ReviveProgress.OnClientEvent:Connect(function(ratio)reviveBar.Size=UDim2.fromScale(math.clamp(ratio,0,1),1)end)
@@ -83,7 +94,16 @@ function HUDController.Init()
         local left=math.max(0,math.floor((matchState.EndTime or 0)-Workspace:GetServerTimeNow()));local phase=PHASE_TEXT[matchState.Phase] or matchState.Phase;if (matchState.Wave or 0)>0 then topBar.Text=string.format("[%s]  WAVE %d/%d  %ds",phase,matchState.Wave,Config.TOTAL_WAVES,left)else topBar.Text=string.format("[%s]  %ds",phase,left)end;topBar.TextColor3=PHASE_COLOR[matchState.Phase] or C.text;objective.Text=matchState.Objective or ""
         local char=localPlayer.Character;local hum=char and char:FindFirstChildWhichIsA("Humanoid");if hum then hpBar.Size=UDim2.fromScale(math.clamp(hum.Health/math.max(hum.MaxHealth,1),0,1),1)end;if char and not char:GetAttribute("Downed") then downedFrame.Visible=false end
         resLabel.Text=string.format("SCRAP %03d   METAL %03d   MEDKIT %d",resources.Scrap or 0,resources.Metal or 0,resources.Medkit or 0);local ws=WeaponController.GetState();updateInventory(ws)
-        if ws and ws.Def then local other=ws.Active=="Primary" and ws.Slots and ws.Slots.Secondary or ws.Slots and ws.Slots.Primary;ammoLabel.Text=string.format("%s  %d / %d",ws.Def.Name,ws.Ammo or 0,ws.Reserve or 0);if other and other.Def then ammoLabel.Text=ammoLabel.Text.."\n[X] "..other.Def.Name end else ammoLabel.Text=char and char:GetAttribute("Role")=="Survivor" and "NO WEAPON" or "" end
+        local isHammer=char and char:GetAttribute("HammerEquipped")==true
+        if isHammer then
+            ammoLabel.Text="HAMMER\nЛКМ ЧИНИТЬ / ПКМ СНЯТЬ"
+        elseif ws and ws.Def then
+            local other=ws.Active=="Primary" and ws.Slots and ws.Slots.Secondary or ws.Slots and ws.Slots.Primary
+            ammoLabel.Text=string.format("%s  %d / %d",ws.Def.Name,ws.Ammo or 0,ws.Reserve or 0)
+            if other and other.Def then ammoLabel.Text=ammoLabel.Text.."\n[X] "..other.Def.Name end
+        else
+            ammoLabel.Text=char and char:GetAttribute("Role")=="Survivor" and "NO WEAPON" or ""
+        end
         updateCounters();if tabFrame.Visible then updateTab() end
     end)
 end
