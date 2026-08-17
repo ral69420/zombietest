@@ -71,6 +71,24 @@ function M.Init()
   end
  end)
  UIS.InputEnded:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseButton2 then M.HammerDismantle(false)end end)
- Run.RenderStepped:Connect(function(dt)local now=os.clock();if carried and ghost and now-lastSolve>1/math.max(G.SolveHz,1)then lastSolve=now;pcall(solve)end;if ghost and ghostCF then local cur=ghost:IsA("Model")and ghost:GetPivot()or ghost.CFrame;local target=ghost:IsA("Model")and ghostCF or ghostCF;local a=math.min(dt*G.LerpSpeed,1);if ghost:IsA("Model")then ghost:PivotTo(cur:Lerp(target,a))else ghost.CFrame=cur:Lerp(target,a)end end;local c=char();if hammerEquipped()and not carried then hammerTarget=tagged(ray(H.Reach),"BarricadeProp")or nearest(H.Reach,true)else hammerTarget=nil end end)
+ Run.RenderStepped:Connect(function(dt)
+  local now=os.clock()
+  if carried and ghost and now-lastSolve>1/math.max(G.SolveHz,1) then
+   lastSolve=now
+   pcall(solve)
+  end
+  if ghost and ghostCF then
+   local cur=ghost:IsA("Model") and ghost:GetPivot() or ghost.CFrame
+   local target=ghostCF
+   local a=math.min(dt*G.LerpSpeed,1)
+   if ghost:IsA("Model") then ghost:PivotTo(cur:Lerp(target,a)) else ghost.CFrame=cur:Lerp(target,a) end
+  end
+  local c=char()
+  if hammerEquipped() and not carried then
+   hammerTarget=tagged(ray(H.Reach),"BarricadeProp") or nearest(H.Reach,true)
+  else
+   hammerTarget=nil
+  end
+ end)
 end
 return M
