@@ -184,9 +184,9 @@ function ZombieRig.Prepare(model: Model, opts): (Humanoid?, BasePart?)
 			if p:IsA("BasePart") then
 				p.CanTouch = false
 				p.CastShadow = false
+				p.CanQuery = true
 				if p == root then
 					p.CanCollide = true
-					p.CanQuery = true
 				else
 					p.CanCollide = false
 					p.Massless = true

@@ -64,18 +64,44 @@ function PlacementRules.Solve(ctx): (CFrame?, string?)
 
 	local size = ctx.size
 	local yaw = PlacementRules.SnapYaw(ctx.yaw or 0)
+	local height = type(ctx.height) == "number" and math.clamp(ctx.height, -4, 4) or 0
 	local hit = Workspace:Raycast(ctx.origin, dir.Unit * ctx.maxDist, rp)
 
 	local cf: CFrame
 	if hit then
-		-- Если упёрлись в поверхность (пол, стена, потолок или другой объект)
 		local normal = hit.Normal
-		local pos = hit.Position + normal * (size.Y * 0.45)
-		cf = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
+		local isFloor = normal.Y > 0.7
+		local isCeiling = normal.Y < -0.7
+		local isWall = not isFloor and not isCeiling
+
+		if isFloor and not B.AllowFloor then return nil, "Нельзя на пол" end
+		if isCeiling and not B.AllowCeiling then return nil, "Нельзя на потолок" end
+		if isWall and not B.AllowWall then return nil, "Нельзя на стену" end
+
+		local offsetDistance = if isWall then (size.Z * 0.5) else (size.Y * 0.5)
+		local pos = hit.Position + normal * offsetDistance
+		cf = CFrame.new(pos) * CFrame.Angles(0, yaw, 0) * CFrame.new(0, height, 0)
 	else
-		-- Свободное размещение в воздухе/пространстве перед собой на комфортной дистанции (10 studs)
 		local airPos = ctx.origin + dir.Unit * math.min(DEFAULT_AIR_DIST, ctx.maxDist)
-		cf = CFrame.new(airPos) * CFrame.Angles(0, yaw, 0)
+		cf = CFrame.new(airPos) * CFrame.Angles(0, yaw, 0) * CFrame.new(0, height, 0)
+	end
+
+	-- Overlap check
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Include
+	overlapParams.FilterDescendantsInstances = PlacementRules.Blockers(ignore)
+	overlapParams.CollisionGroup = "Default"
+
+	local shrink = B.OverlapShrink or 0.05
+	local checkSize = Vector3.new(
+		math.max(0.1, size.X - shrink * 2),
+		math.max(0.1, size.Y - shrink * 2),
+		math.max(0.1, size.Z - shrink * 2)
+	)
+
+	local overlaps = Workspace:GetPartBoundsInBox(cf, checkSize, overlapParams)
+	if #overlaps > 0 then
+		return nil, "Препятствие"
 	end
 
 	return cf, nil
