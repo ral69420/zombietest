@@ -14,13 +14,15 @@ local localPlayer = Players.LocalPlayer
 local pool = {}
 local hintLabel: TextLabel
 local reasonLabel: TextLabel
+local lastUpdate = 0
+local UPDATE_INTERVAL = 1 / 15
 
 local function makeBillboard(): BillboardGui
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "BarricadeHP"
 	bb.Size = UDim2.fromOffset(160, 45)
-	bb.AlwaysOnTop = true
-	bb.MaxDistance = 90
+	bb.AlwaysOnTop = Config.BARRICADE.HP.AlwaysOnTop
+	bb.MaxDistance = Config.BARRICADE.HP.ShowDistance
 	bb.ResetOnSpawn = false
 	bb.Enabled = false
 
@@ -119,7 +121,8 @@ local function build()
 	reasonLabel.TextColor3 = Config.BARRICADE.Ghost.InvalidColor
 	reasonLabel.Parent = gui
 
-	for _ = 1, 25 do
+	local maxBillboards = math.max(1, Config.BARRICADE.HP.MaxBillboards or 10)
+	for _ = 1, maxBillboards do
 		local bb = makeBillboard()
 		bb.Parent = gui
 		table.insert(pool, bb)
@@ -134,9 +137,20 @@ function BarricadeHUD.Init()
 		if hintLabel then hintLabel.Text = hint end
 		if reasonLabel then reasonLabel.Text = reason or "" end
 
+		local now = os.clock()
+		if now - lastUpdate < UPDATE_INTERVAL then return end
+		lastUpdate = now
+
 		local char = localPlayer.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		if not root then
+			for _, bb in pool do bb.Enabled = false end
+			return
+		end
+
+		local hpConfig = Config.BARRICADE.HP
+		local hammerOnly = hpConfig.OnlyWithHammer == true
+		if hammerOnly and not (char:GetAttribute("HammerEquipped") == true) then
 			for _, bb in pool do bb.Enabled = false end
 			return
 		end
@@ -145,10 +159,11 @@ function BarricadeHUD.Init()
 		local near = {}
 		for _, prop in CollectionService:GetTagged("BarricadeProp") do
 			if prop:GetAttribute("IsNailed") ~= true then continue end
+			if hpConfig.HideFullHP and (prop:GetAttribute("HP") or 0) >= (prop:GetAttribute("MaxHP") or 0) then continue end
 			local part = getCenterPart(prop)
 			if not part then continue end
 			local d = (root.Position - part.Position).Magnitude
-			if d > 90 then continue end
+			if d > (hpConfig.ShowDistance or 60) then continue end
 			table.insert(near, { prop = prop, part = part, d = d })
 		end
 		table.sort(near, function(a, b) return a.d < b.d end)
@@ -164,11 +179,9 @@ function BarricadeHUD.Init()
 			local hp = prop:GetAttribute("HP") or 1000
 			local maxHP = math.max(prop:GetAttribute("MaxHP") or hp, 1)
 			local baseMax = math.max(prop:GetAttribute("BaseMaxHP") or maxHP, 1)
-
 			bb.Adornee = entry.part
 			bb.StudsOffsetWorldSpace = Vector3.zero
 			bb.Enabled = true
-
 			local r = bb.Root
 			local nameText = tostring(prop:GetAttribute("PropType") or prop.Name)
 			r.Title.Text = nameText .. (if prop == target then "  ◄" else "")

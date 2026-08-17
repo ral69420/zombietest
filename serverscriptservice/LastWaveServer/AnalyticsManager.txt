@@ -1,6 +1,7 @@
 --!nonstrict
 -- Воронка первых минут + экономика. Без этого метрики из доки мерить нечем.
 local AnalyticsService = game:GetService("AnalyticsService")
+local Players = game:GetService("Players")
 
 local Analytics = {}
 local seen = {}
@@ -29,5 +30,9 @@ function Analytics.Economy(player: Player, flow: Enum.AnalyticsEconomyFlowType,
 			Enum.AnalyticsEconomyTransactionType.Shop.Name, reason)
 	end)
 end
+
+Players.PlayerRemoving:Connect(function(player)
+	seen[player] = nil
+end)
 
 return Analytics
