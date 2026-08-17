@@ -1,0 +1,48 @@
+--!nonstrict
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local Remotes = require(game.ReplicatedStorage.LastWaveShared.Remotes)
+local ClientState = require(script.Parent.ClientState)
+
+local M = {}
+local player = Players.LocalPlayer
+
+local function nearestDowned(): Player?
+	local me = player.Character
+	local root = me and me:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+
+	local best, bestDist = nil, math.huge
+	for _, other in Players:GetPlayers() do
+		if other == player then continue end
+		local char = other.Character
+		local otherRoot = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+		if otherRoot and hum and hum.Health > 0 and char:GetAttribute("Role") == "Survivor" and char:GetAttribute("Downed") == true then
+			local dist = (otherRoot.Position - root.Position).Magnitude
+			if dist < bestDist then
+				best, bestDist = other, dist
+			end
+		end
+	end
+	return best
+end
+
+function M.TryRevive()
+	if ClientState.IsUILocked() then return end
+	local target = nearestDowned()
+	if target then Remotes.ReviveRequest:FireServer(target) end
+end
+
+function M.Init()
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if input.KeyCode == Enum.KeyCode.E then
+			M.TryRevive()
+		end
+	end)
+end
+
+return M

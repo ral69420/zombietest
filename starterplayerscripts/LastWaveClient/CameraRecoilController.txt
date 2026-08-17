@@ -1,0 +1,41 @@
+--!nonstrict
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Remotes = require(game.ReplicatedStorage.LastWaveShared.Remotes)
+
+local M = {}
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+local pitch, pitchVelocity = 0, 0
+local yaw, yawVelocity = 0, 0
+
+local function spring(position, velocity, target, stiffness, damping, dt)
+	velocity += (target - position) * stiffness * dt
+	velocity *= math.exp(-damping * dt)
+	position += velocity * dt
+	return position, velocity
+end
+
+function M.Init()
+	Remotes.WeaponFx.OnClientEvent:Connect(function(shooter, kind, weaponId)
+		if shooter ~= player or kind ~= "Fire" then return end
+		local def = weaponId and require(game.ReplicatedStorage.LastWaveShared.WeaponTypes).Get(weaponId)
+		if not def then return end
+		pitchVelocity -= def.Recoil.Camera * 0.75
+		yawVelocity += (math.random() - 0.5) * def.Recoil.Roll * 0.6
+	end)
+
+	RunService:BindToRenderStep("LastWaveCameraRecoil", Enum.RenderPriority.Camera.Value + 1, function(dt)
+		camera = Workspace.CurrentCamera
+		if not camera then return end
+		pitch, pitchVelocity = spring(pitch, pitchVelocity, 0, 90, 18, math.min(dt, 0.05))
+		yaw, yawVelocity = spring(yaw, yawVelocity, 0, 90, 18, math.min(dt, 0.05))
+		if math.abs(pitch) > 0.0001 or math.abs(yaw) > 0.0001 then
+			camera.CFrame = camera.CFrame * CFrame.Angles(math.rad(pitch), math.rad(yaw), 0)
+		end
+	end)
+end
+
+return M

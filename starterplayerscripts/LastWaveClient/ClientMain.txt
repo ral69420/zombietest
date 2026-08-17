@@ -10,11 +10,15 @@ require(S.MovementController).Init()
 
 require(S.WeaponAnimator).Init()
 
+require(S.CameraRecoilController).Init()
+
 require(S.BarricadeController).Init()
 
 require(S.BarricadeHUD).Init()
 
 require(S.WeaponController).Init()
+
+require(S.ReviveController).Init()
 
 require(S.HUDController).Init()
 
