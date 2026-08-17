@@ -129,7 +129,7 @@ function HammerManager.Init()
  AntiCheat.Bind(Remotes.HammerDismantleRequest,"HammerDismantleRequest",function(p,prop,start)
   if type(start)~="boolean" then return end
   if not start then BarricadeManager.CancelDismantle(p);return end
-  if HammerManager.IsEquipped(p) and Sanity.inst(prop,"Instance") then BarricadeManager.BeginDismantle(p,prop) end
+  if Sanity.inst(prop,"Instance") then BarricadeManager.BeginDismantle(p,prop) end
  end)
  Players.PlayerRemoving:Connect(function(p)BarricadeManager.CancelDismantle(p)end)
 end
