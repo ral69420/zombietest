@@ -64,15 +64,72 @@ local function target(a)local best,bd=nil,400;for _,s in world.survivors do loca
 local function nearestProp(a,maxDist)local best,bd=nil,maxDist;for _,p in world.props do local d=(p.pos-a.root.Position).Magnitude;if d<bd then best=p;bd=d end end;return best end
 local function separate(a)local push=Vector3.zero;local count=0;for _,o in agents do if o~=a and not o.dead then local d=a.root.Position-o.root.Position;local n=d.Magnitude;if n>0.1 and n<Config.AI_SEPARATION_RADIUS then push+=d.Unit*(1-n/Config.AI_SEPARATION_RADIUS);count+=1;if count>=4 then break end end end end;return push*Config.AI_SEPARATION_FORCE end
 local function attack(a,s)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;PlayerManager.ApplyDamage(s.char,a.def.Damage*Config.AI_DAMAGE_MULT,nil)end
-local function attackProp(a,p)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;BarricadeManager.DamageProp(p.prop,a.def.Damage*a.def.PropDamageMultiplier*Config.AI_PROP_DAMAGE_MULT,nil)end
+local function attackProp(a,p)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;BarricadeManager.DamageProp(p.prop,a.def.Damage*Config.AI_PROP_DAMAGE_MULT*math.max(a.def.PropDamageMultiplier or 1, 1),nil)end
 local function followPath(a,pos):Vector3?
 	local jump=a.def.JumpPower>0;local now=os.clock();if not a.pathKey or now-a.pathTime>Config.AI_PATH_MAX_AGE then a.pathKey=requestPath(a.root.Position,pos,jump);a.pathTime=now;a.pathIndex=1 end;local e=pathCache[a.pathKey];if not e or e.points==false then return nil end;local my=a.root.Position;while a.pathIndex<=#e.points and (Vector3.new(e.points[a.pathIndex].X,0,e.points[a.pathIndex].Z)-Vector3.new(my.X,0,my.Z)).Magnitude<Config.AI_WAYPOINT_REACH do a.pathIndex+=1 end;if a.pathIndex>#e.points then a.pathKey=nil;return nil end;local wp=e.points[a.pathIndex];if jump and wp.Y-my.Y>3 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end;return wp-my
 end
 local function think(a)
-	if a.hum.Health<=0 then a.dead=true;return end;local my=a.root.Position;local s=target(a);if not s then a.hum:Move(Vector3.zero);a.nextThink=os.clock()+0.8;return end;local dist=(s.pos-my).Magnitude;if dist>Config.AI_DESPAWN_DIST then a.dead=true;return end;local rate=1/Config.AI_TICK_HZ;if dist>Config.AI_LOD_FAR then rate*=4 elseif dist>Config.AI_LOD_NEAR then rate*=2 end;a.nextThink=os.clock()+rate
-	if dist<=a.def.AttackRange+Config.AI_ATTACK_SLACK and (a.losOk or los(a,s.pos)) then attack(a,s);a.hum:Move(Vector3.zero);return end;local now=os.clock();if now-a.losTime>Config.AI_LOS_RECHECK then a.losTime=now;a.losOk=los(a,s.pos)end;local desired;if a.losOk then a.pathKey=nil;desired=s.pos-my elseif a.blockedBy and a.def.PropDamageMultiplier>=1.5 then local part=if a.blockedBy:IsA("BasePart") then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart");if part and (part.Position-my).Magnitude<=a.def.AttackRange+2 then attackProp(a,{prop=a.blockedBy,part=part});a.hum:Move(Vector3.zero);return end;desired=part and part.Position-my else desired=followPath(a,s.pos) or s.pos-my end
-	if (my-a.lastPos).Magnitude<Config.AI_STUCK_DIST then a.stuck+=rate else a.stuck=0 end;a.lastPos=my;if a.stuck>=Config.AI_STUCK_TIME then a.stuck=0;local p=nearestProp(a,a.def.AttackRange+3);if p then attackProp(a,p);a.hum:Move(Vector3.zero);return end;a.pathKey=nil;local side=math.random()>0.5 and 1 or -1;local flat=Vector3.new(desired.X,0,desired.Z);if flat.Magnitude>0.1 then desired+=Vector3.new(-flat.Z,0,flat.X).Unit*12*side end;if a.def.JumpPower>0 and math.random()<0.4 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end end
-	local flat=Vector3.new(desired.X,0,desired.Z);a.hum:Move(flat.Magnitude>0.1 and (flat.Unit+separate(a)).Unit or Vector3.zero);a.hum.WalkSpeed=a.def.WalkSpeed*Config.AI_SPEED_MULT*(a.model:GetAttribute("Enraged") and 1.35 or 1)
+	if a.hum.Health<=0 then a.dead=true;return end
+	local my=a.root.Position
+	local s=target(a)
+	if not s then a.hum:Move(Vector3.zero);a.nextThink=os.clock()+0.8;return end
+	local dist=(s.pos-my).Magnitude
+	if dist>Config.AI_DESPAWN_DIST then a.dead=true;return end
+	local rate=1/Config.AI_TICK_HZ
+	if dist>Config.AI_LOD_FAR then rate*=4 elseif dist>Config.AI_LOD_NEAR then rate*=2 end
+	a.nextThink=os.clock()+rate
+
+	if dist<=a.def.AttackRange+Config.AI_ATTACK_SLACK and (a.losOk or los(a,s.pos)) then
+		attack(a,s);a.hum:Move(Vector3.zero);return
+	end
+
+	local now=os.clock()
+	if now-a.losTime>Config.AI_LOS_RECHECK then
+		a.losTime=now
+		a.losOk=los(a,s.pos)
+	end
+
+	-- Если на пути баррикада — зомби бьют её немедленно, если подошли вплотную
+	if a.blockedBy then
+		local part=if a.blockedBy:IsA("BasePart") then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart")
+		if part and (part.Position-my).Magnitude<=a.def.AttackRange+3.5 then
+			attackProp(a,{prop=a.blockedBy,part=part})
+			a.hum:Move(Vector3.zero)
+			return
+		end
+	end
+
+	local desired
+	if a.losOk then
+		a.pathKey=nil
+		desired=s.pos-my
+	elseif a.blockedBy then
+		local part=if a.blockedBy:IsA("BasePart") then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart")
+		desired=part and (part.Position-my) or (s.pos-my)
+	else
+		desired=followPath(a,s.pos) or (s.pos-my)
+	end
+
+	if (my-a.lastPos).Magnitude<Config.AI_STUCK_DIST then a.stuck+=rate else a.stuck=0 end
+	a.lastPos=my
+	if a.stuck>=Config.AI_STUCK_TIME then
+		a.stuck=0
+		local p=nearestProp(a,a.def.AttackRange+3.5)
+		if p then
+			attackProp(a,p)
+			a.hum:Move(Vector3.zero)
+			return
+		end
+		a.pathKey=nil
+		local side=math.random()>0.5 and 1 or -1
+		local flat=Vector3.new(desired.X,0,desired.Z)
+		if flat.Magnitude>0.1 then desired+=Vector3.new(-flat.Z,0,flat.X).Unit*12*side end
+		if a.def.JumpPower>0 and math.random()<0.4 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+	end
+
+	local flat=Vector3.new(desired.X,0,desired.Z)
+	a.hum:Move(flat.Magnitude>0.1 and (flat.Unit+separate(a)).Unit or Vector3.zero)
+	a.hum.WalkSpeed=a.def.WalkSpeed*Config.AI_SPEED_MULT*(a.model:GetAttribute("Enraged") and 1.35 or 1)
 end
 local function schedulerStep()
 	local phase=MatchState.Phase();if phase=="GameOver" or phase=="Intermission" then if #agents>0 then ZombieManager.ClearAllAI()end;return end;if os.clock()-world.t>1/Config.AI_SNAPSHOT_HZ then updateWorld()end;for i=#agents,1,-1 do local a=agents[i];if a.dead or not a.model.Parent or a.hum.Health<=0 then removeAgent(i)end end;local now=os.clock();local done=0;for _=1,#agents do if done>=math.max(Config.AI_SLICE,1) then break end;sliceCursor=sliceCursor%math.max(#agents,1)+1;local a=agents[sliceCursor];if a and now>=a.nextThink then done+=1;local ok,e=pcall(think,a);if not ok then warn("[AI] think: "..tostring(e));a.nextThink=now+1 end end end
