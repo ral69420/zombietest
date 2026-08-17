@@ -235,6 +235,12 @@ local function getAllowedSpeed(
 		return 0
 	end
 
+	local isLeaping = character:GetAttribute("IsLeaping") == true
+	local isCharging = character:GetAttribute("IsCharging") == true
+	if isLeaping or isCharging then
+		return 90
+	end
+
 	return math.max(humanoid.WalkSpeed, 8)
 end
 
@@ -363,6 +369,19 @@ function AntiCheat.Init()
 					"[AC] watchdog error: "
 						.. tostring(errorMessage)
 				)
+			end
+		end
+	end)
+
+	-- Flag decay to prevent accumulated false kicks on latency spikes
+	task.spawn(function()
+		local interval = Config.AC.FlagDecayInterval or 10
+		while true do
+			task.wait(interval)
+			for p, f in flags do
+				if f > 0 then
+					flags[p] = math.max(0, f - 1)
+				end
 			end
 		end
 	end)

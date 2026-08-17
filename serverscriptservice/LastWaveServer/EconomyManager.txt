@@ -26,6 +26,14 @@ end
 function EconomyManager.ResetAll()
 	teamFuel = 0
 	for _, p in Players:GetPlayers() do EconomyManager.Reset(p) end
+	local nodes = Workspace:FindFirstChild("ResourceNodes")
+	if nodes then
+		for _, node in nodes:GetDescendants() do
+			if node:IsA("BasePart") then
+				node:SetAttribute("Remaining", 40)
+			end
+		end
+	end
 end
 
 function EconomyManager.Get(player: Player, kind: string): number
@@ -61,7 +69,8 @@ end
 function EconomyManager.GetFuel(): number return teamFuel end
 
 function EconomyManager.AddFuel(n: number)
-	teamFuel = math.clamp(teamFuel + n, 0, Config.FUEL_REQUIRED)
+	local req = Config.FUEL_REQUIRED or 100
+	teamFuel = math.clamp(teamFuel + n, 0, req)
 	for _, p in Players:GetPlayers() do push(p) end
 end
 
