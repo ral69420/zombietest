@@ -1,7 +1,6 @@
 --!nonstrict
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 
 local Remotes = require(game.ReplicatedStorage.LastWaveShared.Remotes)
 local ClientState = require(script.Parent.ClientState)
@@ -39,7 +38,7 @@ end
 function M.Init()
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then return end
-		if input.KeyCode == Enum.KeyCode.E then
+		if input.KeyCode == Enum.KeyCode.F then
 			M.TryRevive()
 		end
 	end)
