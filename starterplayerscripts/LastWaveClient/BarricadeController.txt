@@ -1,94 +1,353 @@
 --!nonstrict
-local Players=game:GetService("Players");local UIS=game:GetService("UserInputService");local Run=game:GetService("RunService");local Workspace=game:GetService("Workspace");local CS=game:GetService("CollectionService")
-local Shared=game.ReplicatedStorage.LastWaveShared;local Config=require(Shared.Config);local Remotes=require(Shared.Remotes);local Placement=require(Shared.PlacementRules);local ClientState=require(script.Parent.ClientState)
-local M={};local B=Config.BARRICADE;local G=B.Ghost;local H=Config.HAMMER;local player=Players.LocalPlayer;local camera=Workspace.CurrentCamera
-local carried,ghost,ghostHL,carryHL,ghostCF,hammerTarget=nil,nil,nil,nil,nil,nil;local reason;local yaw=0;local lastSolve=0;local dismantleHeld=false
-local function char()return player.Character end
-local function hammerEquipped()local c=char();return c and c:GetAttribute("HammerEquipped")==true end
-local function head()local c=char();local p=c and(c:FindFirstChild("Head")or c:FindFirstChild("HumanoidRootPart"));return p and p:IsA("BasePart")and p or nil end
-local function aim()local v=camera.ViewportSize;return camera:ViewportPointToRay(v.X*.5,v.Y*.5).Direction.Unit end
-local function ray(dist)local h=head();if not h then return nil end;local p=RaycastParams.new();p.FilterType=Enum.RaycastFilterType.Exclude;p.FilterDescendantsInstances={char(),ghost};local r=Workspace:Raycast(h.Position,aim()*dist,p);return r and r.Instance end
-local function tagged(i,tag)local c=i;while c and c~=Workspace do if CS:HasTag(c,tag)then return c end;c=c.Parent end end
-local function nearest(dist,nailed)local c=char();local r=c and c:FindFirstChild("HumanoidRootPart");if not r then return nil end;local best,bd=nil,dist;for _,p in CS:GetTagged("BarricadeProp")do if p~=carried and(nailed==nil or(p:GetAttribute("IsNailed")==true)==nailed)then local d=Placement.ReachDistance(r.Position,p);if d<bd then best,bd=p,d end end end;return best end
-local function clearGhost()if ghost then ghost:Destroy()end;ghost=nil;ghostHL=nil;ghostCF=nil end
-local function color(c)if ghostHL then ghostHL.OutlineColor=c;ghostHL.FillColor=c end;if carryHL then carryHL.OutlineColor=c end end
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local Run = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local CS = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+local Placement = require(Shared.PlacementRules)
+local ClientState = require(script.Parent.ClientState)
+
+local M = {}
+local B = Config.BARRICADE
+local G = B.Ghost
+local H = Config.HAMMER
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+local carried, ghost, ghostHL, carryHL, ghostCF, hammerTarget = nil, nil, nil, nil, nil, nil
+local reason
+local yaw = 0
+local height = 0
+local lastSolve = 0
+local dismantleHeld = false
+
+local ROT_STEP = 15
+local HEIGHT_SPEED = 2
+local MAX_HEIGHT = 2.5
+
+local function char() return player.Character end
+local function hammerEquipped() local c = char(); return c and c:GetAttribute("HammerEquipped") == true end
+local function head() local c = char(); local p = c and (c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart")); return p and p:IsA("BasePart") and p or nil end
+
+local function aim()
+	local v = camera.ViewportSize
+	return camera:ViewportPointToRay(v.X * 0.5, v.Y * 0.5).Direction.Unit
+end
+
+local function ray(dist)
+	local h = head()
+	if not h then return nil end
+	local p = RaycastParams.new()
+	p.FilterType = Enum.RaycastFilterType.Exclude
+	p.FilterDescendantsInstances = { char(), ghost }
+	local r = Workspace:Raycast(h.Position, aim() * dist, p)
+	return r and r.Instance
+end
+
+local function tagged(i, tag)
+	local c = i
+	while c and c ~= Workspace do
+		if CS:HasTag(c, tag) then return c end
+		c = c.Parent
+	end
+end
+
+local function nearest(dist, nailed)
+	local c = char()
+	local r = c and c:FindFirstChild("HumanoidRootPart")
+	if not r then return nil end
+	local best, bd = nil, dist
+	for _, p in CS:GetTagged("BarricadeProp") do
+		if p ~= carried and (nailed == nil or (p:GetAttribute("IsNailed") == true) == nailed) then
+			local d = Placement.ReachDistance(r.Position, p)
+			if d < bd then best, bd = p, d end
+		end
+	end
+	return best
+end
+
+local function clearGhost()
+	if ghost then ghost:Destroy() end
+	ghost = nil
+	ghostHL = nil
+	ghostCF = nil
+end
+
+local function color(c)
+	if ghostHL then
+		ghostHL.OutlineColor = c
+		ghostHL.FillColor = c
+	end
+	if carryHL then
+		carryHL.OutlineColor = c
+	end
+end
+
 local function makeGhost(p)
- clearGhost();local ok,g=pcall(function()return p:Clone()end);if not ok or not g then return end;for _,x in g:GetDescendants()do if x:IsA("BasePart")then x.Anchored=true;x.CanCollide=false;x.CanQuery=false;x.CanTouch=false;x.Transparency=G.PreviewTransparency elseif x:IsA("Script")or x:IsA("LocalScript")or x:IsA("Sound")then x:Destroy()end end;local h=Instance.new("Highlight");h.FillTransparency=G.FillTransparency;h.OutlineTransparency=G.OutlineTransparency;h.DepthMode=Enum.HighlightDepthMode.Occluded;h.Adornee=g;h.Parent=g;ghostHL=h;g.Name="BarricadeGhost";g.Parent=Workspace;ghost=g
+	clearGhost()
+	local ok, g = pcall(function() return p:Clone() end)
+	if not ok or not g then return end
+	for _, x in g:GetDescendants() do
+		if x:IsA("BasePart") then
+			x.Anchored = true
+			x.CanCollide = false
+			x.CanQuery = false
+			x.CanTouch = false
+			x.Transparency = G.PreviewTransparency
+			x.Material = Enum.Material.SmoothPlastic
+		elseif x:IsA("Script") or x:IsA("LocalScript") or x:IsA("Sound") then
+			x:Destroy()
+		end
+	end
+	local h = Instance.new("Highlight")
+	h.FillColor = G.ValidColor
+	h.OutlineColor = G.ValidColor
+	h.FillTransparency = G.FillTransparency
+	h.OutlineTransparency = G.OutlineTransparency
+	h.DepthMode = Enum.HighlightDepthMode.Occluded
+	h.Adornee = g
+	h.Parent = g
+	ghostHL = h
+	g.Name = "BarricadeGhost"
+	g.Parent = Workspace
+	ghost = g
 end
+
 local function carryVisual(p)
- if carryHL then carryHL:Destroy();carryHL=nil end;if not p then return end;local h=Instance.new("Highlight");h.FillTransparency=0.7;h.OutlineTransparency=0;h.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop;h.Adornee=p;h.Parent=p;carryHL=h
+	if carryHL then carryHL:Destroy(); carryHL = nil end
+	if not p then return end
+	local h = Instance.new("Highlight")
+	h.FillColor = G.ValidColor
+	h.OutlineColor = G.ValidColor
+	h.FillTransparency = 0.7
+	h.OutlineTransparency = 0
+	h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	h.Adornee = p
+	h.Parent = p
+	carryHL = h
 end
+
 local function solve()
- if not carried or not ghost then return end;local h=head();if not h then return end;local cf,r=Placement.Solve({origin=h.Position,dir=aim(),maxDist=B.MaxPlaceDistance,size=Placement.SizeOf(carried),yaw=yaw,ignore={char(),carried,ghost}});reason=r;ghostCF=cf;color(if cf then G.ValidColor else G.InvalidColor);if not cf then ghostCF=nil end
+	if not carried or not ghost then return end
+	local h = head()
+	if not h then return end
+	local cf, r = Placement.Solve({
+		origin = h.Position,
+		dir = aim(),
+		maxDist = B.MaxPlaceDistance,
+		size = Placement.SizeOf(carried),
+		yaw = yaw,
+		ignore = { char(), carried, ghost }
+	})
+	reason = r
+	if cf then
+		ghostCF = cf * CFrame.new(0, height, 0)
+		color(G.ValidColor)
+	else
+		ghostCF = nil
+		color(G.InvalidColor)
+	end
 end
-function M.GetHint()local c=char();if c and c:GetAttribute("Role")=="Zombie"then return"ЛКМ бить · R способность",nil end;if carried then return"ЛКМ поставить · R вращать на Y · T вращать на X · E бросить",reason end;if hammerEquipped()then return"ЛКМ чинить · ПКМ удерживать для снятия",nil end;return"E взять предмет · [3] молоток для ремонта",nil end
-function M.IsCarrying()return carried~=nil end
-function M.HammerTarget()return hammerTarget end
+
+function M.GetHint()
+	local c = char()
+	if c and c:GetAttribute("Role") == "Zombie" then return "ЛКМ бить · R способность", nil end
+	if carried then return "ЛКМ / Y поставить · R / Shift+R поворот · Колёсико высота · E бросить", reason end
+	if hammerEquipped() then return "ЛКМ чинить · ПКМ удерживать для снятия", nil end
+	return "E взять предмет · [3] молоток для ремонта", nil end
+
+function M.IsCarrying() return carried ~= nil end
+function M.HammerTarget() return hammerTarget end
+
 function M.TryPickupOrDrop()
- if ClientState.IsUILocked() then return end
- local c=char()
- local carriedVal = c and c:FindFirstChild("CarriedProp")
- local actualCarried = carried or (carriedVal and carriedVal.Value)
- if actualCarried then
-  Remotes.DropRequest:FireServer()
-  return
- end
- local p=tagged(ray(Config.MAX_INTERACT_DISTANCE),"BarricadeProp")or nearest(Config.MAX_INTERACT_DISTANCE,false)
- if p then Remotes.PickupRequest:FireServer(p) end
+	if ClientState.IsUILocked() then return end
+	local c = char()
+	local carriedVal = c and c:FindFirstChild("CarriedProp")
+	local actualCarried = carried or (carriedVal and carriedVal.Value)
+	if actualCarried then
+		Remotes.DropRequest:FireServer()
+		return
+	end
+	local p = tagged(ray(Config.MAX_INTERACT_DISTANCE), "BarricadeProp") or nearest(Config.MAX_INTERACT_DISTANCE, false)
+	if p then Remotes.PickupRequest:FireServer(p) end
 end
-function M.TryPlace()if carried and not ClientState.IsUILocked()then Remotes.PlaceFreeRequest:FireServer(aim(),yaw)end end
-function M.Rotate(d,axis)axis=axis or"yaw";if axis=="yaw"then yaw=(yaw+math.rad(B.RotateStep)*d)%(math.pi*2)elseif axis=="pitch"then end;lastSolve=0 end
-function M.HammerHit()if hammerEquipped()and hammerTarget then Remotes.HammerRepairRequest:FireServer(hammerTarget)end end
-function M.HammerDismantle(start)if not hammerEquipped()then return end;if start and hammerTarget then dismantleHeld=true;Remotes.HammerDismantleRequest:FireServer(hammerTarget,true)elseif not start and dismantleHeld then dismantleHeld=false;Remotes.HammerDismantleRequest:FireServer(nil,false)end end
-function M.TryInteract()if ClientState.IsUILocked()then return end;local p=ray(Config.MAX_INTERACT_DISTANCE);if p and p:IsA("BasePart")and p:GetAttribute("InteractType")then Remotes.InteractRequest:FireServer(p);return end;local nodes=Workspace:FindFirstChild("ResourceNodes");if p and nodes and p:IsDescendantOf(nodes)then Remotes.GatherRequest:FireServer(p)end end
-function M.Attack()if not ClientState.IsUILocked()then Remotes.ZombieAttackRequest:FireServer(ray(Config.MAX_INTERACT_DISTANCE))end end
-function M.Ability()if not ClientState.IsUILocked()then Remotes.AbilityRequest:FireServer(ray(60))end end
+
+function M.TryPlace()
+	if carried and not ClientState.IsUILocked() then
+		Remotes.PlaceFreeRequest:FireServer(aim(), yaw)
+	end
+end
+
+function M.Rotate(d, isShift)
+	local step = ROT_STEP * (d or 1)
+	if isShift then step = -step end
+	yaw = (yaw + math.rad(step)) % (math.pi * 2)
+	lastSolve = 0
+end
+
+function M.AdjustHeight(delta)
+	height = math.clamp(height + delta, -MAX_HEIGHT, MAX_HEIGHT)
+	lastSolve = 0
+end
+
+function M.HammerHit()
+	if hammerEquipped() and hammerTarget then
+		Remotes.HammerRepairRequest:FireServer(hammerTarget)
+	end
+end
+
+function M.HammerDismantle(start)
+	if not hammerEquipped() then return end
+	if start and hammerTarget then
+		dismantleHeld = true
+		Remotes.HammerDismantleRequest:FireServer(hammerTarget, true)
+	elseif not start and dismantleHeld then
+		dismantleHeld = false
+		Remotes.HammerDismantleRequest:FireServer(nil, false)
+	end
+end
+
+function M.TryInteract()
+	if ClientState.IsUILocked() then return end
+	local p = ray(Config.MAX_INTERACT_DISTANCE)
+	if p and p:IsA("BasePart") and p:GetAttribute("InteractType") then
+		Remotes.InteractRequest:FireServer(p)
+		return
+	end
+	local nodes = Workspace:FindFirstChild("ResourceNodes")
+	if p and nodes and p:IsDescendantOf(nodes) then
+		Remotes.GatherRequest:FireServer(p)
+	end
+end
+
+function M.Attack()
+	if not ClientState.IsUILocked() then
+		Remotes.ZombieAttackRequest:FireServer(ray(Config.MAX_INTERACT_DISTANCE))
+	end
+end
+
+function M.Ability()
+	if not ClientState.IsUILocked() then
+		Remotes.AbilityRequest:FireServer(ray(60))
+	end
+end
+
 local function watch(c)
- local ref=c:WaitForChild("CarriedProp",10);if not ref then return end;ref.Changed:Connect(function()local p=ref.Value;if p==carried then return end;if carried then carryVisual(nil)end;carried=p;if p then yaw=0;carryVisual(p);makeGhost(p)else clearGhost()end end);if ref.Value then carried=ref.Value;carryVisual(carried);makeGhost(carried)end
+	local ref = c:WaitForChild("CarriedProp", 10)
+	if not ref then return end
+	ref.Changed:Connect(function()
+		local p = ref.Value
+		if p == carried then return end
+		if carried then carryVisual(nil) end
+		carried = p
+		if p then
+			yaw = 0
+			height = 0
+			carryVisual(p)
+			makeGhost(p)
+		else
+			clearGhost()
+		end
+	end)
+	if ref.Value then
+		carried = ref.Value
+		yaw = 0
+		height = 0
+		carryVisual(carried)
+		makeGhost(carried)
+	end
 end
+
 function M.Init()
- if player.Character then task.spawn(watch,player.Character)end;player.CharacterAdded:Connect(function(c)carried=nil;clearGhost();carryVisual(nil);task.spawn(watch,c)end)
- UIS.InputBegan:Connect(function(i,processed)
-  if processed or ClientState.IsUILocked() then return end
-  local c=char()
-  local role=c and c:GetAttribute("Role")
-  if i.KeyCode==Enum.KeyCode.E and role=="Survivor" then
-   M.TryPickupOrDrop()
-  elseif i.KeyCode==Enum.KeyCode.R then
-   if carried then M.Rotate(1,"yaw") elseif role=="Zombie" then M.Ability() end
-  elseif i.KeyCode==Enum.KeyCode.T then
-   if carried then M.Rotate(1,"pitch") end
-  elseif i.KeyCode==Enum.KeyCode.Q then
-   M.TryInteract()
-  elseif i.KeyCode==Enum.KeyCode.H then
-   Remotes.UseMedkitRequest:FireServer()
-  elseif i.UserInputType==Enum.UserInputType.MouseButton1 then
-   if role=="Zombie" then M.Attack()
-   elseif carried then M.TryPlace()
-   elseif hammerEquipped() then M.HammerHit() end
-  elseif i.UserInputType==Enum.UserInputType.MouseButton2 and hammerEquipped() and not carried then
-   M.HammerDismantle(true)
-  end
- end)
- UIS.InputEnded:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseButton2 then M.HammerDismantle(false)end end)
- Run.RenderStepped:Connect(function(dt)
-  local now=os.clock()
-  if carried and ghost and now-lastSolve>1/math.max(G.SolveHz,1) then
-   lastSolve=now
-   pcall(solve)
-  end
-  if ghost and ghostCF then
-   local cur=ghost:IsA("Model") and ghost:GetPivot() or ghost.CFrame
-   local target=ghostCF
-   local a=math.min(dt*G.LerpSpeed,1)
-   if ghost:IsA("Model") then ghost:PivotTo(cur:Lerp(target,a)) else ghost.CFrame=cur:Lerp(target,a) end
-  end
-  local c=char()
-  if hammerEquipped() and not carried then
-   hammerTarget=tagged(ray(H.Reach),"BarricadeProp") or nearest(H.Reach,true)
-  else
-   hammerTarget=nil
-  end
- end)
+	if player.Character then task.spawn(watch, player.Character) end
+	player.CharacterAdded:Connect(function(c)
+		carried = nil
+		height = 0
+		clearGhost()
+		carryVisual(nil)
+		task.spawn(watch, c)
+	end)
+
+	UIS.InputBegan:Connect(function(i, processed)
+		if processed or ClientState.IsUILocked() then return end
+		local c = char()
+		local role = c and c:GetAttribute("Role")
+
+		if i.KeyCode == Enum.KeyCode.E and role == "Survivor" then
+			M.TryPickupOrDrop()
+		elseif i.KeyCode == Enum.KeyCode.Y and role == "Survivor" and carried then
+			M.TryPlace()
+		elseif i.KeyCode == Enum.KeyCode.R then
+			if carried then
+				local isShift = UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift)
+				M.Rotate(1, isShift)
+			elseif role == "Zombie" then
+				M.Ability()
+			end
+		elseif i.KeyCode == Enum.KeyCode.T then
+			if carried then
+				M.Rotate(2, false)
+			end
+		elseif i.KeyCode == Enum.KeyCode.Q then
+			M.TryInteract()
+		elseif i.KeyCode == Enum.KeyCode.H then
+			Remotes.UseMedkitRequest:FireServer()
+		elseif i.UserInputType == Enum.UserInputType.MouseButton1 then
+			if role == "Zombie" then
+				M.Attack()
+			elseif carried then
+				M.TryPlace()
+			elseif hammerEquipped() then
+				M.HammerHit()
+			end
+		elseif i.UserInputType == Enum.UserInputType.MouseButton2 and hammerEquipped() and not carried then
+			M.HammerDismantle(true)
+		end
+	end)
+
+	UIS.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton2 then
+			M.HammerDismantle(false)
+		end
+	end)
+
+	UIS.InputChanged:Connect(function(i, processed)
+		if processed or not carried then return end
+		if i.UserInputType == Enum.UserInputType.MouseWheel then
+			M.AdjustHeight(i.Position.Z * (1 / HEIGHT_SPEED))
+		end
+	end)
+
+	Run.RenderStepped:Connect(function(dt)
+		local now = os.clock()
+		if carried and ghost and now - lastSolve > 1 / math.max(G.SolveHz, 1) then
+			lastSolve = now
+			pcall(solve)
+		end
+
+		if ghost and ghostCF then
+			local cur = ghost:IsA("Model") and ghost:GetPivot() or ghost.CFrame
+			local target = ghostCF
+			local a = math.min(dt * G.LerpSpeed, 1)
+			if ghost:IsA("Model") then
+				ghost:PivotTo(cur:Lerp(target, a))
+			else
+				ghost.CFrame = cur:Lerp(target, a)
+			end
+		end
+
+		local c = char()
+		if hammerEquipped() and not carried then
+			hammerTarget = tagged(ray(H.Reach), "BarricadeProp") or nearest(H.Reach, true)
+		else
+			hammerTarget = nil
+		end
+	end)
 end
+
 return M
