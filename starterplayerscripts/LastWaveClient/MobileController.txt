@@ -25,6 +25,7 @@ local C_PLACE = Color3.fromRGB(50, 100, 200)
 local C_ROT = Color3.fromRGB(90, 90, 90)
 local C_FIX = Color3.fromRGB(160, 140, 60)
 local C_REMOVE = Color3.fromRGB(150, 80, 60)
+local C_FREEZE = Color3.fromRGB(80, 150, 210)
 
 local function makeBtn(gui, label, subLabel, pos, bgColor, borderCol, size)
 	local frame = Instance.new("Frame")
@@ -148,7 +149,7 @@ function MobileController.Init()
 	local frameE, tbE, lblE, subE = makeBtn(gui, "E", "take", UDim2.new(1, -95, 1, -140), C_TAKE, C_TAKE:Lerp(Color3.new(1, 1, 1), 0.3), BTN_MAIN)
 	local frameY, tbY = makeBtn(gui, "Y", "place", UDim2.new(1, -20, 1, -140), C_PLACE, C_PLACE:Lerp(Color3.new(1, 1, 1), 0.3), BTN_MAIN)
 	local frameR, tbR = makeBtn(gui, "R", "rotate", UDim2.new(1, -95, 1, -225), C_ROT, C_ROT:Lerp(Color3.new(1, 1, 1), 0.3), BTN_SEC)
-	local frameC, tbC = makeBtn(gui, "✕", "cancel", UDim2.new(1, -20, 1, -225), C_CANCEL, C_CANCEL:Lerp(Color3.new(1, 1, 1), 0.3), BTN_SEC)
+	local frameFreeze, tbFreeze, lblFreeze, subFreeze = makeBtn(gui, "LOCK", "freeze", UDim2.new(1, -20, 1, -225), C_FREEZE, C_FREEZE:Lerp(Color3.new(1, 1, 1), 0.3), BTN_SEC)
 
 	local frameFire, tbFire = makeBtn(gui, "FIRE", "shoot", UDim2.new(1, -95, 1, -315), Color3.fromRGB(180, 50, 50), Color3.fromRGB(240, 90, 90), BTN_MAIN)
 	local frameFix, tbFix = makeBtn(gui, "FIX", "repair", UDim2.new(1, -175, 1, -140), C_FIX, C_FIX:Lerp(Color3.new(1,1,1), 0.3), BTN_SEC)
@@ -158,7 +159,7 @@ function MobileController.Init()
 	bindPress(frameE, tbE, C_TAKE, BTN_MAIN, function() BarricadeController.TryPickupOrDrop() end)
 	bindPress(frameY, tbY, C_PLACE, BTN_MAIN, function() BarricadeController.TryPlace() end)
 	bindPress(frameR, tbR, C_ROT, BTN_SEC, function() BarricadeController.Rotate(1, false) end)
-	bindPress(frameC, tbC, C_CANCEL, BTN_SEC, function() BarricadeController.TryPickupOrDrop() end)
+	bindPress(frameFreeze, tbFreeze, C_FREEZE, BTN_SEC, function() BarricadeController.ToggleFreeze() end)
 	bindPress(frameFire, tbFire, Color3.fromRGB(180, 50, 50), BTN_MAIN, function()
 		local char = localPlayer.Character
 		if char and char:GetAttribute("Role") == "Zombie" then
@@ -182,15 +183,19 @@ function MobileController.Init()
 		local role = char and char:GetAttribute("Role")
 		local isSurv = role == "Survivor"
 		local carrying = BarricadeController.IsCarrying()
+		local isFrozen = BarricadeController.IsFrozen()
 		local isHammer = char and char:GetAttribute("HammerEquipped") == true
 
 		if isSurv then
 			if carrying then
 				lblE.Text = "DROP"
 				subE.Text = "drop"
+				lblFreeze.Text = if isFrozen then "UNLOCK" else "LOCK"
+				subFreeze.Text = if isFrozen then "unfreeze" else "freeze"
+
 				showFrame(frameY, C_PLACE, C_PLACE:Lerp(Color3.new(1,1,1), 0.3))
 				showFrame(frameR, C_ROT, C_ROT:Lerp(Color3.new(1,1,1), 0.3))
-				showFrame(frameC, C_CANCEL, C_CANCEL:Lerp(Color3.new(1,1,1), 0.3))
+				showFrame(frameFreeze, C_FREEZE, C_FREEZE:Lerp(Color3.new(1,1,1), 0.3))
 				hideFrame(frameFix)
 				hideFrame(frameRemove)
 			else
@@ -198,7 +203,7 @@ function MobileController.Init()
 				subE.Text = "take"
 				hideFrame(frameY)
 				hideFrame(frameR)
-				hideFrame(frameC)
+				hideFrame(frameFreeze)
 				if isHammer then
 					showFrame(frameFix, C_FIX, C_FIX:Lerp(Color3.new(1,1,1), 0.3))
 					showFrame(frameRemove, C_REMOVE, C_REMOVE:Lerp(Color3.new(1,1,1), 0.3))
@@ -210,7 +215,7 @@ function MobileController.Init()
 		else
 			hideFrame(frameY)
 			hideFrame(frameR)
-			hideFrame(frameC)
+			hideFrame(frameFreeze)
 			hideFrame(frameFix)
 			hideFrame(frameRemove)
 			lblE.Text = "E"
