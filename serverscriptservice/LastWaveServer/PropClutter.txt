@@ -1,7 +1,7 @@
 --!nonstrict
 -- Вещи, которые лежат НА пропе. Стул, а на нём коробки.
--- Пока проп на месте: хлам приварен и анкорнут, физики ноль (бесплатно).
--- Взял проп: хлам срывается, включается масса и коллизия. Игрок задел -> всё падает.
+-- Физика и коллизии включены всегда: игрок может толкать предметы и баррикады.
+-- Спавнятся строго на поверхности объекта через рэйкаст.
 
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
@@ -28,16 +28,31 @@ local function isClutter(inst: Instance): boolean
 	return false
 end
 
--- Регистрируем при спавне пропа: хлам стоит на месте и ничего не считает.
+local function settleOnSurface(part: BasePart, prop: Instance)
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Include
+	rp.FilterDescendantsInstances = { prop }
+	local hit = Workspace:Raycast(part.Position + Vector3.new(0, 1.5, 0), Vector3.new(0, -5, 0), rp)
+	if hit then
+		part.CFrame = CFrame.new(hit.Position + Vector3.new(0, part.Size.Y * 0.5 + 0.02, 0)) * (part.CFrame - part.Position)
+	end
+end
+
+-- Регистрируем при спавне пропа: включаем физику и коллизию сразу, чтобы можно было толкать.
 function PropClutter.Register(prop: Instance)
 	if not C.Enabled then return end
 	local list = {}
 	for _, d in prop:GetDescendants() do
 		if d:IsA("BasePart") and isClutter(d) then
-			d.Anchored = true
+			settleOnSurface(d, prop)
+			d.Anchored = false
+			d.Massless = false
 			d.CanCollide = true
-			d.CanTouch = false
+			d.CanQuery = true
+			d.CanTouch = true
 			d.CastShadow = false
+			d.CollisionGroup = Config.GROUP_DEBRIS
+			d.CustomPhysicalProperties = PhysicalProperties.new(C.Density, 0.5, 0.35, 1, 1)
 			table.insert(list, d)
 		end
 	end
@@ -51,7 +66,7 @@ function PropClutter.Forget(prop: Instance)
 	registered[prop] = nil
 end
 
--- Взял проп -> хлам срывается в физику.
+-- Взял проп -> отсоединяем оставшиеся связи и переносим в Debris
 function PropClutter.Release(prop: Instance)
 	if not C.Enabled then return end
 	local list = registered[prop]
@@ -67,7 +82,6 @@ function PropClutter.Release(prop: Instance)
 			continue
 		end
 
-		-- Рвём все связи с пропом, иначе хлам уедет вместе с ним.
 		for _, j in part:GetChildren() do
 			if j:IsA("JointInstance") or j:IsA("WeldConstraint") or j:IsA("Constraint") then
 				j:Destroy()
