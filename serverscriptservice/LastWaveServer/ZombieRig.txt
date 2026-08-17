@@ -1,0 +1,271 @@
+--!nonstrict
+-- Модели зомби. Один резолвер на AI и на игроков.
+-- Ищет ServerStorage.ZombieRigs.<Имя>, чинит риг, и НИКОГДА не молчит об ошибке.
+local ServerStorage = game:GetService("ServerStorage")
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+
+local ZombieRig = {}
+local warned = {}
+
+local DISABLED_STATES = {
+	Enum.HumanoidStateType.Climbing,
+	Enum.HumanoidStateType.Flying,
+	Enum.HumanoidStateType.Swimming,
+	Enum.HumanoidStateType.PlatformStanding,
+	Enum.HumanoidStateType.StrafingNoPhysics,
+	Enum.HumanoidStateType.Ragdoll,
+	Enum.HumanoidStateType.FallingDown,
+	Enum.HumanoidStateType.Seated,
+}
+
+local function warnOnce(key: string, msg: string)
+	if warned[key] then return end
+	warned[key] = true
+	warn("[ZombieRig] " .. msg)
+end
+
+-- ── поиск шаблона ─────────────────────────────────────────────────────
+function ZombieRig.Folder(): Instance?
+	return ServerStorage:FindFirstChild("ZombieRigs")
+end
+
+function ZombieRig.FindTemplate(zType: string): Instance?
+	local folder = ZombieRig.Folder()
+	if not folder then
+		warnOnce("nofolder",
+			"ServerStorage.ZombieRigs НЕ НАЙДЕНА. Создай Folder с именем ровно ZombieRigs и положи модели внутрь. Пока идут серые заглушки.")
+		return nil
+	end
+
+	local map = Config.ZOMBIE_MODELS or {}
+	local candidates = { map[zType], zType, map.Default, "Default", "Walker" }
+	for _, name in candidates do
+		if type(name) == "string" then
+			local tpl = folder:FindFirstChild(name)
+			if tpl and (tpl:IsA("Model") or tpl:IsA("BasePart")) then return tpl end
+		end
+	end
+
+	-- имя без учёта регистра и пробелов: типичная причина "не находит"
+	local want = string.lower((string.gsub(zType, "%s", "")))
+	for _, child in folder:GetChildren() do
+		if string.lower((string.gsub(child.Name, "%s", ""))) == want then return child end
+	end
+
+	warnOnce("miss_" .. zType, ("в ZombieRigs нет модели для %s. Имя должно быть ровно '%s' (или пропиши своё в Config.ZOMBIE_MODELS)."):format(zType, tostring(map[zType] or zType)))
+	return nil
+end
+
+local function cloneTemplate(tpl: Instance): Model?
+	if not tpl.Archivable then
+		tpl.Archivable = true -- Archivable=false -> Clone() возвращает nil. Частая тихая смерть.
+	end
+	local ok, clone = pcall(function() return tpl:Clone() end)
+	if not ok or not clone then
+		warnOnce("clone_" .. tpl.Name, ("не удалось клонировать %s. Проверь, что это Model."):format(tpl.Name))
+		return nil
+	end
+	if clone:IsA("BasePart") then
+		local wrap = Instance.new("Model")
+		clone.Parent = wrap
+		clone = wrap
+	end
+	return clone
+end
+
+-- ── серый фоллбэк (только если твоей модели реально нет) ──────────────
+local function buildFallbackRig(): Model
+	local m = Instance.new("Model")
+
+	local torso = Instance.new("Part")
+	torso.Name = "Torso"; torso.Size = Vector3.new(2, 2, 1)
+	torso.Color = Color3.fromRGB(60, 100, 60); torso.Parent = m
+
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"; root.Size = Vector3.new(2, 2, 1)
+	root.Transparency = 1; root.Parent = m
+
+	local head = Instance.new("Part")
+	head.Name = "Head"; head.Size = Vector3.new(2, 1, 1)
+	head.Color = Color3.fromRGB(90, 140, 80); head.Parent = m
+
+	local rootJoint = Instance.new("Motor6D")
+	rootJoint.Name = "RootJoint"; rootJoint.Part0 = root; rootJoint.Part1 = torso
+	rootJoint.Parent = root
+
+	local neck = Instance.new("Motor6D")
+	neck.Name = "Neck"; neck.Part0 = torso; neck.Part1 = head
+	neck.C0 = CFrame.new(0, 1, 0); neck.C1 = CFrame.new(0, -0.5, 0)
+	neck.Parent = torso
+
+	local hum = Instance.new("Humanoid")
+	hum.RigType = Enum.HumanoidRigType.R6
+	hum.HipHeight = 2
+	hum.Parent = m
+
+	m.PrimaryPart = root
+	return m
+end
+
+-- ── ремонт любой модели до рабочего гуманоида ────────────────────────
+local function ensureHumanoid(model: Model): Humanoid
+	local hum = model:FindFirstChildWhichIsA("Humanoid")
+	if not hum then
+		hum = Instance.new("Humanoid")
+		hum.Parent = model
+		warnOnce("nohum_" .. model.Name, ("в модели %s не было Humanoid, добавил сам."):format(model.Name))
+	end
+	return hum
+end
+
+local function ensureRoot(model: Model, hum: Humanoid): BasePart?
+	local root = model:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then return root end
+
+	local anyPart = model:FindFirstChildWhichIsA("BasePart", true)
+	if not anyPart then return nil end
+
+	-- у модели нет рута: строим его и приваливаем всё остальное
+	local cf, size = model:GetBoundingBox()
+	local newRoot = Instance.new("Part")
+	newRoot.Name = "HumanoidRootPart"
+	newRoot.Size = Vector3.new(math.max(size.X * 0.5, 1), math.max(size.Y * 0.35, 1), math.max(size.Z * 0.5, 1))
+	newRoot.Transparency = 1
+	newRoot.CFrame = cf
+	newRoot.Parent = model
+
+	for _, p in model:GetDescendants() do
+		if p:IsA("BasePart") and p ~= newRoot then
+			local w = Instance.new("WeldConstraint")
+			w.Part0, w.Part1 = newRoot, p
+			w.Parent = newRoot
+		end
+	end
+	hum.HipHeight = math.max(size.Y * 0.5 - newRoot.Size.Y * 0.5, 0)
+	warnOnce("noroot_" .. model.Name,
+		("в модели %s не было HumanoidRootPart, собрал риг автоматически. Для нормальных анимаций лучше сделать реальный R6/R15 риг."):format(model.Name))
+	return newRoot
+end
+
+-- opts = { IsAI = boolean, ZombieType = string }
+function ZombieRig.Prepare(model: Model, opts): (Humanoid?, BasePart?)
+	opts = opts or {}
+
+	-- Anchored части = зомби стоит колом. Лечим всегда.
+	for _, p in model:GetDescendants() do
+		if p:IsA("BasePart") then p.Anchored = false end
+	end
+
+	local hum = ensureHumanoid(model)
+	local root = ensureRoot(model, hum)
+	if not root then return nil, nil end
+	model.PrimaryPart = root
+
+	hum.BreakJointsOnDeath = false
+	hum.RequiresNeck = false -- без этого кастомный риг без Neck умирает сам
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	hum.NameDisplayDistance = 0
+	hum.AutomaticScalingEnabled = false
+	hum.UseJumpPower = true
+
+	if not model:FindFirstChild("Head", true) then
+		warnOnce("nohead_" .. model.Name,
+			("в модели %s нет части с именем Head, хедшоты по ней работать не будут."):format(model.Name))
+	end
+
+	if opts.IsAI then
+		for _, state in DISABLED_STATES do
+			pcall(function() hum:SetStateEnabled(state, false) end)
+		end
+		for _, p in model:GetDescendants() do
+			if p:IsA("BasePart") then
+				p.CanTouch = false
+				p.CastShadow = false
+				if p == root then
+					p.CanCollide = true
+					p.CanQuery = true
+				else
+					p.CanCollide = false
+					p.Massless = true
+				end
+			elseif p:IsA("Script") or p:IsA("LocalScript") then
+				p:Destroy() -- дефолтный Animate у AI всё равно не запустится
+			end
+		end
+		-- серверная анимация ходьбы: реплицируется всем без LocalScript
+		if Config.AI_WALK_ANIM and Config.AI_WALK_ANIM ~= "" then
+			local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
+			local anim = Instance.new("Animation")
+			anim.AnimationId = Config.AI_WALK_ANIM
+			local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
+			anim:Destroy()
+			if ok and track then
+				track.Priority = Enum.AnimationPriority.Movement
+				track.Looped = true
+				track:Play()
+			end
+		end
+	else
+		-- игрок: скрипты (Animate) НЕ трогаем, иначе он застынет в T-позе
+		for _, p in model:GetDescendants() do
+			if p:IsA("BasePart") then p.CastShadow = false end
+		end
+	end
+
+	return hum, root
+end
+
+-- ── публичное API ─────────────────────────────────────────────────────
+-- Возвращает готовую модель. isAI = false для игрока.
+function ZombieRig.Build(zType: string, isAI: boolean): Model?
+	local tpl = ZombieRig.FindTemplate(zType)
+	local model = tpl and cloneTemplate(tpl) or nil
+	local usedFallback = false
+
+	if not model then
+		if not isAI and not Config.ZOMBIE_PLAYER_FALLBACK then
+			return nil -- игроку лучше дать аватар, чем серый куб
+		end
+		model = buildFallbackRig()
+		usedFallback = true
+	end
+
+	local hum, root = ZombieRig.Prepare(model, { IsAI = isAI, ZombieType = zType })
+	if not hum or not root then
+		model:Destroy()
+		if usedFallback then return nil end
+		model = buildFallbackRig()
+		ZombieRig.Prepare(model, { IsAI = isAI, ZombieType = zType })
+	end
+
+	model:SetAttribute("ZombieType", zType)
+	model:SetAttribute("UsedFallbackRig", usedFallback)
+	return model
+end
+
+-- Возврат модели из пула в боевое состояние
+function ZombieRig.Reset(model: Model)
+	local hum = model:FindFirstChildWhichIsA("Humanoid")
+	if hum then
+		hum.Health = hum.MaxHealth
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+	end
+	local root = model.PrimaryPart
+	if root then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
+end
+
+function ZombieRig.GiveOwnership(model: Model, player: Player?)
+	local root = model.PrimaryPart
+	if not root then return end
+	pcall(function()
+		if player then root:SetNetworkOwner(player) else root:SetNetworkOwnershipAuto() end
+	end)
+end
+
+return ZombieRig

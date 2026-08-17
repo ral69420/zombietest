@@ -1,0 +1,163 @@
+--!nonstrict
+-- Одна геометрия установки для клиента и сервера.
+-- Клиент рисует призрак ЭТОЙ функцией, сервер принимает решение ЭТОЙ ЖЕ функцией.
+-- Итог: что зелёное, то встанет. Рассинхрона "призрак зелёный, а сервер отказал" не бывает.
+
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
+
+local Config = require(script.Parent.Config)
+
+local PlacementRules = {}
+local B = Config.BARRICADE
+local TAG_PROP = "BarricadeProp"
+
+-- Размер пропа берём ОДИН раз при регистрации и кладём в атрибут.
+-- Так клиент и сервер считают по одинаковым числам.
+function PlacementRules.SizeOf(prop: Instance): Vector3
+	local cached = prop:GetAttribute("PropSize")
+	if typeof(cached) == "Vector3" then return cached end
+	if prop:IsA("BasePart") then return prop.Size end
+	if prop:IsA("Model") then
+		local _, size = prop:GetBoundingBox()
+		return size
+	end
+	return Vector3.one * 2
+end
+
+function PlacementRules.SnapYaw(yaw: number): number
+	local step = math.rad(math.max(B.SnapYawDeg, 1))
+	if step <= 0 then return yaw end
+	return math.floor(yaw / step + 0.5) * step
+end
+
+-- Кого считаем препятствием: другие баррикады и живые тела.
+-- Стены и пол НЕ мешают: касание опоры это норма, а не пересечение.
+function PlacementRules.Blockers(ignore: { Instance }?): { Instance }
+	local skip = {}
+	if ignore then
+		for _, i in ignore do skip[i] = true end
+	end
+
+	local out = {}
+	for _, prop in CollectionService:GetTagged(TAG_PROP) do
+		if not skip[prop] and prop.Parent then
+			table.insert(out, prop)
+		end
+	end
+	for _, p in Players:GetPlayers() do
+		local c = p.Character
+		if c and not skip[c] then table.insert(out, c) end
+	end
+	local ai = Workspace:FindFirstChild("AIZombies")
+	if ai and not skip[ai] then table.insert(out, ai) end
+	return out
+end
+
+-- ctx = { origin: Vector3, dir: Vector3, maxDist: number, size: Vector3,
+--         yaw: number, ignore: {Instance} }
+-- Возвращает CFrame (по ЦЕНТРУ bounding box) или nil + причину для игрока.
+function PlacementRules.Solve(ctx): (CFrame?, string?)
+	local ignore = ctx.ignore or {}
+
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = ignore
+	rp.RespectCanCollide = true
+	rp.IgnoreWater = true
+
+	local dir = ctx.dir
+	if typeof(dir) ~= "Vector3" or dir.Magnitude < 0.1 then
+		return nil, "Некуда ставить"
+	end
+
+	local hit = Workspace:Raycast(ctx.origin, dir.Unit * ctx.maxDist, rp)
+	if not hit then
+		return nil, "Слишком далеко: подойди ближе"
+	end
+
+	local size = ctx.size
+	local normal = hit.Normal
+	local yaw = ctx.yaw or 0
+	local pos = hit.Position
+	local isWall = math.abs(normal.Y) < 0.5
+
+	if isWall then
+		-- Прилипание к стене: баррикада встаёт вплотную и лицом от стены.
+		if B.AlignToWall then
+			yaw = math.atan2(normal.X, normal.Z)
+		end
+		local flat = Vector3.new(normal.X, 0, normal.Z)
+		if flat.Magnitude > 0.05 then
+			pos = pos + flat.Unit * (size.Z * 0.5 + 0.05)
+		end
+	else
+		local slope = math.deg(math.acos(math.clamp(normal.Y, -1, 1)))
+		if slope > B.MaxSlopeDeg then
+			return nil, "Слишком крутой склон"
+		end
+	end
+
+	yaw = PlacementRules.SnapYaw(yaw)
+
+	-- ГЛАВНОЕ ПРАВИЛО: под баррикадой обязана быть опора.
+	local from = pos + Vector3.new(0, size.Y * 0.5 + 0.5, 0)
+	local support = Workspace:Raycast(
+		from,
+		Vector3.new(0, -(size.Y + B.GroundMaxGap + 0.5), 0),
+		rp
+	)
+	if not support then
+		return nil, "Нет опоры: в воздухе не ставится"
+	end
+
+	local cf = CFrame.new(support.Position + Vector3.new(0, size.Y * 0.5 + 0.02, 0))
+		* CFrame.Angles(0, yaw, 0)
+
+	local op = OverlapParams.new()
+	op.FilterType = Enum.RaycastFilterType.Include
+	op.FilterDescendantsInstances = PlacementRules.Blockers(ignore)
+	op.MaxParts = 1
+	if #Workspace:GetPartBoundsInBox(cf, size * B.OverlapShrink, op) > 0 then
+		return nil, "Здесь уже занято"
+	end
+
+	return cf, nil
+end
+
+-- Ставим модель ПО ЦЕНТРУ bounding box, а не по пивоту.
+-- Из-за пивота модели раньше вставали криво и наполовину в полу.
+function PlacementRules.ApplyCenter(prop: Instance, cf: CFrame)
+	if prop:IsA("BasePart") then
+		prop.CFrame = cf
+		return
+	end
+	if not prop:IsA("Model") then return end
+	local box = prop:GetBoundingBox()
+	local offset = box:ToObjectSpace(prop:GetPivot())
+	prop:PivotTo(cf * offset)
+end
+
+-- Дистанция до ближайшей точки габарита, а не до центра.
+-- Лечит "не могу поднять шкаф, стоя вплотную".
+function PlacementRules.ReachDistance(from: Vector3, prop: Instance): number
+	local cf, size
+	if prop:IsA("Model") then
+		cf, size = prop:GetBoundingBox()
+	elseif prop:IsA("BasePart") then
+		cf, size = prop.CFrame, prop.Size
+	else
+		return math.huge
+	end
+	local lp = cf:PointToObjectSpace(from)
+	local h = size * 0.5
+	local clamped = Vector3.new(
+		math.clamp(lp.X, -h.X, h.X),
+		math.clamp(lp.Y, -h.Y, h.Y),
+		math.clamp(lp.Z, -h.Z, h.Z)
+	)
+	return (cf:PointToWorldSpace(clamped) - from).Magnitude
+end
+
+return PlacementRules

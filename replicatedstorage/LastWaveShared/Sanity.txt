@@ -1,0 +1,32 @@
+--!strict
+-- Проверки аргументов ремоутов. Всё, что пришло с клиента - враждебно.
+local Sanity = {}
+
+function Sanity.num(v: any, min: number?, max: number?): boolean
+	if type(v) ~= "number" then return false end
+	if v ~= v or v == math.huge or v == -math.huge then return false end -- NaN / inf
+	if min and v < min then return false end
+	if max and v > max then return false end
+	return true
+end
+
+function Sanity.str(v: any, maxLen: number?): boolean
+	return type(v) == "string" and #v > 0 and #v <= (maxLen or 48)
+end
+
+function Sanity.vec(v: any): boolean
+	if typeof(v) ~= "Vector3" then return false end
+	return Sanity.num(v.X) and Sanity.num(v.Y) and Sanity.num(v.Z)
+end
+
+function Sanity.unitVec(v: any): boolean
+	if not Sanity.vec(v) then return false end
+	local m = v.Magnitude
+	return m > 0.9 and m < 1.1
+end
+
+function Sanity.inst(v: any, className: string): boolean
+	return typeof(v) == "Instance" and v:IsA(className) and v:IsDescendantOf(game)
+end
+
+return Sanity

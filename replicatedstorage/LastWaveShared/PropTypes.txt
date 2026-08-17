@@ -1,0 +1,125 @@
+--!strict
+
+export type PropDefinition = {
+	MaxHP: number,
+	WeightClass: "Light" | "Medium" | "Heavy" | "Meme",
+	CarrySpeedMultiplier: number,
+
+	-- Физика установленного предмета
+	Mass: number,
+	Density: number,
+	Friction: number,
+	Elasticity: number,
+	CanCollide: boolean,
+
+	SocketClass: { string },
+	PlaceCost: { [string]: number },
+	SalvageYield: { [string]: number },
+	Tier: number,
+}
+
+local PropTypes: { [string]: PropDefinition } = {
+	OfficeChair = {
+		MaxHP = 1000,
+		WeightClass = "Light",
+		CarrySpeedMultiplier = 0.95,
+
+		Mass = 18,
+		Density = 0.7,
+		Friction = 0.8,
+		Elasticity = 0.05,
+		CanCollide = true,
+
+		SocketClass = { "Small", "Medium", "Large" },
+		PlaceCost = {},
+		SalvageYield = { Scrap = 10 },
+		Tier = 1,
+	},
+
+	OfficeDesk = {
+		MaxHP = 1500,
+		WeightClass = "Medium",
+		CarrySpeedMultiplier = 0.80,
+
+		Mass = 55,
+		Density = 0.9,
+		Friction = 0.9,
+		Elasticity = 0.02,
+		CanCollide = true,
+
+		SocketClass = { "Medium", "Large" },
+		PlaceCost = {},
+		SalvageYield = { Scrap = 18 },
+		Tier = 1,
+	},
+
+	BookShelf = {
+		MaxHP = 2000,
+		WeightClass = "Heavy",
+		CarrySpeedMultiplier = 0.65,
+
+		Mass = 90,
+		Density = 1.1,
+		Friction = 0.95,
+		Elasticity = 0.01,
+		CanCollide = true,
+
+		SocketClass = { "Medium", "Large" },
+		PlaceCost = { Metal = 5 },
+		SalvageYield = { Scrap = 20, Metal = 6 },
+		Tier = 2,
+	},
+
+	SteelPlate = {
+		MaxHP = 1200,
+		WeightClass = "Heavy",
+		CarrySpeedMultiplier = 0.60,
+
+		Mass = 120,
+		Density = 2.5,
+		Friction = 0.85,
+		Elasticity = 0,
+		CanCollide = true,
+
+		SocketClass = { "Small", "Medium", "Large" },
+		PlaceCost = { Metal = 25 },
+		SalvageYield = { Metal = 12 },
+		Tier = 3,
+	},
+
+	VendingMachine = {
+		MaxHP = 900,
+		WeightClass = "Meme",
+		CarrySpeedMultiplier = 0.50,
+
+		Mass = 180,
+		Density = 2.2,
+		Friction = 0.9,
+		Elasticity = 0,
+		CanCollide = true,
+
+		SocketClass = { "Large" },
+		PlaceCost = {},
+		SalvageYield = { Scrap = 30 },
+		Tier = 2,
+	},
+
+	ToiletStall = {
+		MaxHP = 500,
+		WeightClass = "Meme",
+		CarrySpeedMultiplier = 0.55,
+
+		Mass = 75,
+		Density = 1,
+		Friction = 0.85,
+		Elasticity = 0.02,
+		CanCollide = true,
+
+		SocketClass = { "Medium", "Large" },
+		PlaceCost = {},
+		SalvageYield = { Scrap = 22 },
+		Tier = 1,
+	},
+}
+
+return PropTypes

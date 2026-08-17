@@ -1,0 +1,47 @@
+--!strict
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local EVENTS = {
+	-- client -> server (намерения, не результаты)
+	"PickupRequest","DropRequest","PlaceRequest","RepairRequest","GatherRequest",
+	"PlaceFreeRequest","HammerRepairRequest","HammerDismantleRequest",   -- НОВОЕ
+	"ZombieAttackRequest","AbilityRequest","WeaponFireRequest","ReloadRequest",
+	"SwitchWeaponRequest","ReviveRequest","SprintRequest","KitSelectRequest",
+	"ZombieClassRequest","PurchaseRequest","InteractRequest","UseMedkitRequest",
+	-- server -> client (состояние)
+	"StateChanged","ResourcesChanged","ScoreChanged","MatchSummary","ShopCatalogPush",
+	"PlayerInfected","PlayerDowned","PlayerRevived","ReviveProgress",
+	"WeaponState","SocketState","Notify","SectorChanged","KitOptions",
+}
+
+-- Эфемерные эффекты: терять можно, порядок не важен
+local UNRELIABLE = { "PropFx","HitFx","AbilityFx","WeaponFx","ClutterFx" }
+local FUNCTIONS = { "GetGameState","GetShopCatalog" }
+
+local Remotes = {}
+local folder: Folder
+
+if RunService:IsServer() then
+	folder = Instance.new("Folder")
+	folder.Name = "LastWaveRemotes"
+	folder.Parent = ReplicatedStorage
+
+	local function make(class: string, name: string)
+		local o = Instance.new(class)
+		o.Name = name
+		o.Parent = folder
+		Remotes[name] = o
+	end
+
+	for _, n in EVENTS do make("RemoteEvent", n) end
+	for _, n in UNRELIABLE do make("UnreliableRemoteEvent", n) end
+	for _, n in FUNCTIONS do make("RemoteFunction", n) end
+else
+	folder = ReplicatedStorage:WaitForChild("LastWaveRemotes") :: Folder
+	for _, n in EVENTS do Remotes[n] = folder:WaitForChild(n) end
+	for _, n in UNRELIABLE do Remotes[n] = folder:WaitForChild(n) end
+	for _, n in FUNCTIONS do Remotes[n] = folder:WaitForChild(n) end
+end
+
+return Remotes

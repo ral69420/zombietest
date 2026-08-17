@@ -1,0 +1,189 @@
+--!nonstrict
+-- Здоровье баррикад и подсказки. Всё рисуется локально: трафика ноль.
+-- На полосе три зоны: текущее HP, сколько ещё можно вернуть молотком, и потерянный навсегда максимум.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Placement = require(Shared.PlacementRules)
+local BarricadeController = require(script.Parent.BarricadeController)
+
+local BarricadeHUD = {}
+local HP = Config.BARRICADE.HP
+local localPlayer = Players.LocalPlayer
+
+local pool = {}
+local hintLabel: TextLabel
+local reasonLabel: TextLabel
+
+local function makeBillboard(): BillboardGui
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "BarricadeHP"
+	bb.Size = UDim2.fromOffset(HP.Width, HP.Height)
+	bb.AlwaysOnTop = false
+	bb.MaxDistance = HP.ShowDistance
+	bb.Enabled = false
+
+	local root = Instance.new("Frame")
+	root.Name = "Root"
+	root.Size = UDim2.fromScale(1, 1)
+	root.BackgroundTransparency = 1
+	root.Parent = bb
+
+	local name = Instance.new("TextLabel")
+	name.Name = "Title"
+	name.Size = UDim2.new(1, 0, 0, 16)
+	name.BackgroundTransparency = 1
+	name.Font = Enum.Font.GothamBold
+	name.TextSize = 13
+	name.TextColor3 = Color3.new(1, 1, 1)
+	name.TextStrokeTransparency = 0.3
+	name.Parent = root
+
+	local back = Instance.new("Frame")
+	back.Name = "Back"
+	back.Size = UDim2.new(1, -8, 0, 10)
+	back.Position = UDim2.new(0, 4, 0, 18)
+	back.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+	back.BorderSizePixel = 0
+	back.Parent = root
+	Instance.new("UICorner", back).CornerRadius = UDim.new(0, 3)
+
+	-- потолок ремонта: сколько ещё можно вернуть молотком
+	local cap = Instance.new("Frame")
+	cap.Name = "Cap"
+	cap.BackgroundColor3 = Color3.fromRGB(90, 130, 90)
+	cap.BorderSizePixel = 0
+	cap.Size = UDim2.fromScale(1, 1)
+	cap.Parent = back
+	Instance.new("UICorner", cap).CornerRadius = UDim.new(0, 3)
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.BackgroundColor3 = Color3.fromRGB(90, 255, 130)
+	fill.BorderSizePixel = 0
+	fill.Size = UDim2.fromScale(1, 1)
+	fill.ZIndex = 2
+	fill.Parent = back
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 3)
+
+	local text = Instance.new("TextLabel")
+	text.Name = "Text"
+	text.Size = UDim2.new(1, 0, 0, 12)
+	text.Position = UDim2.new(0, 0, 0, 28)
+	text.BackgroundTransparency = 1
+	text.Font = Enum.Font.Gotham
+	text.TextSize = 11
+	text.TextColor3 = Color3.fromRGB(210, 210, 220)
+	text.TextStrokeTransparency = 0.5
+	text.Parent = root
+
+	return bb
+end
+
+local function build()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "LastWaveBuildHUD"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 12
+	gui.Parent = localPlayer:WaitForChild("PlayerGui")
+
+	hintLabel = Instance.new("TextLabel")
+	hintLabel.Size = UDim2.new(1, 0, 0, 20)
+	hintLabel.Position = UDim2.new(0, 0, 1, -46)
+	hintLabel.BackgroundTransparency = 1
+	hintLabel.Font = Enum.Font.GothamMedium
+	hintLabel.TextSize = 15
+	hintLabel.TextColor3 = Color3.fromRGB(235, 235, 245)
+	hintLabel.TextStrokeTransparency = 0.4
+	hintLabel.Parent = gui
+
+	reasonLabel = Instance.new("TextLabel")
+	reasonLabel.Size = UDim2.new(1, 0, 0, 18)
+	reasonLabel.Position = UDim2.new(0, 0, 1, -26)
+	reasonLabel.BackgroundTransparency = 1
+	reasonLabel.Font = Enum.Font.GothamBold
+	reasonLabel.TextSize = 14
+	reasonLabel.TextColor3 = Config.BARRICADE.Ghost.InvalidColor
+	reasonLabel.Parent = gui
+
+	for _ = 1, HP.MaxBillboards do
+		table.insert(pool, makeBillboard())
+	end
+end
+
+function BarricadeHUD.Init()
+	build()
+
+	local acc = 0
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.1 then return end   -- 10 Гц: полоски не стоят кадров
+		acc = 0
+
+		local hint, reason = BarricadeController.GetHint()
+		hintLabel.Text = hint
+		reasonLabel.Text = reason or ""
+
+		local char = localPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then
+			for _, bb in pool do bb.Enabled = false end
+			return
+		end
+
+		local hasHammer = char:GetAttribute("HammerEquipped") == true
+		local target = BarricadeController.HammerTarget()
+
+		-- собираем ближайшие установленные баррикады
+		local near = {}
+		for _, prop in CollectionService:GetTagged("BarricadeProp") do
+			if prop:GetAttribute("IsNailed") ~= true then continue end
+			local part = if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart")
+			if not part then continue end
+			local d = Placement.ReachDistance(root.Position, prop)
+			if d > HP.ShowDistance then continue end
+			if HP.OnlyWithHammer and not hasHammer and prop ~= target then continue end
+			local hp = prop:GetAttribute("HP") or 0
+			local maxHP = prop:GetAttribute("MaxHP") or 1
+			if HP.HideFullHP and hp >= maxHP and prop ~= target then continue end
+			table.insert(near, { prop = prop, part = part, d = d })
+		end
+		table.sort(near, function(a, b) return a.d < b.d end)
+
+		for i, bb in pool do
+			local entry = near[i]
+			if not entry then
+				bb.Enabled = false
+				bb.Adornee = nil
+				continue
+			end
+			local prop = entry.prop
+			local hp = prop:GetAttribute("HP") or 0
+			local maxHP = math.max(prop:GetAttribute("MaxHP") or 1, 1)
+			local baseMax = math.max(prop:GetAttribute("BaseMaxHP") or maxHP, 1)
+
+			bb.Adornee = entry.part
+			bb.StudsOffsetWorldSpace = Vector3.new(0, (entry.part.Size.Y * 0.5) + HP.Offset, 0)
+			bb.Enabled = true
+
+			local r = bb.Root
+			r.Title.Text = tostring(prop:GetAttribute("PropType") or prop.Name)
+				.. (if prop == target then "   ◄" else "")
+			r.Back.Fill.Size = UDim2.fromScale(math.clamp(hp / baseMax, 0, 1), 1)
+			r.Back.Cap.Size = UDim2.fromScale(math.clamp(maxHP / baseMax, 0, 1), 1)
+			r.Back.Fill.BackgroundColor3 = if prop:GetAttribute("Infected")
+				then Color3.fromRGB(180, 90, 220)
+				else Color3.fromRGB(90, 255, 130)
+			r.Text.Text = string.format(
+				"%d / %d   ремонт до %d",
+				hp, math.floor(maxHP), math.floor(maxHP)
+			)
+		end
+	end)
+end
+
+return BarricadeHUD

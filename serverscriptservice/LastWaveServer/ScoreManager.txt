@@ -1,0 +1,98 @@
+--!nonstrict
+local Players = game:GetService("Players")
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+local DataManager = require(script.Parent.DataManager)
+
+local ScoreManager = {}
+local matchScore = {}     -- [player] = {Score, Kills, Revives, Placed, Broken, Repairs}
+
+local function ensure(player: Player)
+	if matchScore[player] then return matchScore[player] end
+	matchScore[player] = { Score=0, Kills=0, Revives=0, Placed=0, Broken=0, Repairs=0 }
+	return matchScore[player]
+end
+
+local function leaderstats(player: Player)
+	local ls = player:FindFirstChild("leaderstats")
+	if not ls then
+		ls = Instance.new("Folder"); ls.Name = "leaderstats"; ls.Parent = player
+		local score = Instance.new("IntValue"); score.Name = "Score"; score.Parent = ls
+		local kills = Instance.new("IntValue"); kills.Name = "Kills"; kills.Parent = ls
+	end
+	return ls
+end
+
+function ScoreManager.Award(player: Player, key: string, mult: number?)
+	if not player or not player.Parent then return end
+	local base = Config.SCORE[key]
+	if not base then return end
+	local d = ensure(player)
+	local gain = math.floor(base * (mult or 1))
+	d.Score += gain
+
+	if key == "ZombieKill" then d.Kills += 1; DataManager.Stat(player, "ZombieKills", 1) end
+	if key == "Revive" then d.Revives += 1; DataManager.Stat(player, "Revives", 1) end
+	if key == "PropPlaced" then d.Placed += 1; DataManager.Stat(player, "PropsPlaced", 1) end
+	if key == "PropDestroyed" then d.Broken += 1; DataManager.Stat(player, "PropsBroken", 1) end
+	if key == "PropRepaired" then d.Repairs += 1 end
+
+	local ls = leaderstats(player)
+	ls.Score.Value = d.Score
+	ls.Kills.Value = d.Kills
+	Remotes.ScoreChanged:FireClient(player, d)
+end
+
+function ScoreManager.AwardAllSurvivors(key: string)
+	local PlayerManager = require(script.Parent.PlayerManager)
+	for _, p in PlayerManager.GetAllSurvivors() do ScoreManager.Award(p, key) end
+end
+
+function ScoreManager.Get(player: Player) return ensure(player) end
+
+function ScoreManager.ResetMatch()
+	for _, p in Players:GetPlayers() do
+		matchScore[p] = nil
+		local ls = leaderstats(p)
+		ls.Score.Value = 0; ls.Kills.Value = 0
+	end
+end
+
+function ScoreManager.BroadcastSummary(survivorsWon: boolean, escaped: {Player})
+	local rows = {}
+	for player, d in matchScore do
+		if player.Parent then
+			table.insert(rows, {
+				Name = player.DisplayName, UserId = player.UserId,
+				Score = d.Score, Kills = d.Kills, Revives = d.Revives,
+				Placed = d.Placed, Broken = d.Broken,
+			})
+		end
+	end
+	table.sort(rows, function(a, b) return a.Score > b.Score end)
+
+	-- Мета-прогресс: проиграл != ничего не получил (док: не наказывать)
+	for player, d in matchScore do
+		if not player.Parent then continue end
+		local coins = math.floor(d.Score * 0.35) + (if survivorsWon then 40 else 15)
+		DataManager.AddCoins(player, coins)
+		DataManager.AddXP(player, math.floor(d.Score * 0.5) + 25)
+		DataManager.Stat(player, "Matches", 1)
+	end
+	for _, p in escaped do DataManager.Stat(p, "Escapes", 1) end
+
+	Remotes.MatchSummary:FireAllClients({
+		SurvivorsWon = survivorsWon,
+		MVP = rows[1],
+		Rows = rows,
+	})
+end
+
+function ScoreManager.Init()
+	Players.PlayerAdded:Connect(function(p) ensure(p); leaderstats(p) end)
+	Players.PlayerRemoving:Connect(function(p) matchScore[p] = nil end)
+	for _, p in Players:GetPlayers() do ensure(p); leaderstats(p) end
+end
+
+return ScoreManager

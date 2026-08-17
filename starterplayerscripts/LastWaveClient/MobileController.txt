@@ -1,0 +1,126 @@
+--!nonstrict
+-- Мобильное управление. Крупные кнопки, без двойных срабатываний.
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local Remotes = require(game.ReplicatedStorage.LastWaveShared.Remotes)
+local BarricadeController = require(script.Parent.BarricadeController)
+local WeaponController = require(script.Parent.WeaponController)
+local MovementController = require(script.Parent.MovementController)
+local ShopController = require(script.Parent.ShopController)
+
+local MobileController = {}
+local localPlayer = Players.LocalPlayer
+local buttons = {}
+
+local function makeButton(gui, name, text, pos, size, color, onDown, onUp)
+	local b = Instance.new("TextButton")
+	b.Name = name
+	b.Size = size
+	b.Position = pos
+	b.BackgroundColor3 = color
+	b.BackgroundTransparency = 0.15
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 15
+	b.Text = text
+	b.AutoButtonColor = true
+	b.Parent = gui
+	Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
+
+	-- ровно одно срабатывание: раньше Down + Activated стреляли дважды
+	if onDown then b.MouseButton1Down:Connect(onDown) end
+	if onUp then
+		b.MouseButton1Up:Connect(onUp)
+		b.MouseLeave:Connect(onUp)
+	end
+
+	buttons[name] = b
+	return b
+end
+
+function MobileController.Init()
+	if not UserInputService.TouchEnabled then return end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "LastWaveTouch"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 15
+	gui.Parent = localPlayer:WaitForChild("PlayerGui")
+
+	local BIG = UDim2.fromOffset(96, 96)
+	local MED = UDim2.fromOffset(78, 78)
+
+	makeButton(gui, "Fire", "ОГОНЬ", UDim2.new(1, -120, 1, -140), BIG, Color3.fromRGB(180, 50, 50),
+		function()
+			local char = localPlayer.Character
+			if char and char:GetAttribute("Role") == "Zombie" then
+				BarricadeController.Attack()
+			else
+				WeaponController.Fire()
+			end
+		end)
+
+	makeButton(gui, "Carry", "ВЗЯТЬ", UDim2.new(1, -120, 1, -250), MED, Color3.fromRGB(60, 110, 180),
+		function() BarricadeController.TryPickupOrDrop() end)
+
+	makeButton(gui, "Place", "СТАВИТЬ", UDim2.new(1, -215, 1, -250), MED, Color3.fromRGB(60, 160, 90),
+		function() BarricadeController.TryPlace() end)
+
+	makeButton(gui, "Rotate", "ПОВОРОТ", UDim2.new(1, -310, 1, -250), MED, Color3.fromRGB(70, 130, 160),
+		function() BarricadeController.Rotate(1) end)
+
+	makeButton(gui, "Fix", "ЧИНИТЬ", UDim2.new(1, -310, 1, -140), MED, Color3.fromRGB(160, 140, 60),
+		function() BarricadeController.HammerHit() end)
+
+	makeButton(gui, "Remove", "СНЯТЬ", UDim2.new(1, -310, 1, -350), MED, Color3.fromRGB(150, 80, 60),
+		function() BarricadeController.HammerDismantle(true) end,
+		function() BarricadeController.HammerDismantle(false) end)
+
+	makeButton(gui, "Interact", "ДЕЙСТВИЕ", UDim2.new(1, -215, 1, -140), MED, Color3.fromRGB(150, 120, 50),
+		function() BarricadeController.TryInteract() end)
+
+	makeButton(gui, "Reload", "ПЕРЕЗАР.", UDim2.new(1, -120, 1, -350), MED, Color3.fromRGB(90, 90, 110),
+		function() WeaponController.Reload() end)
+
+	makeButton(gui, "Swap", "СМЕНА", UDim2.new(1, -215, 1, -450), MED, Color3.fromRGB(90, 90, 130),
+		function() WeaponController.SwitchNext() end)
+
+	makeButton(gui, "Sprint", "БЕГ", UDim2.new(0, 150, 1, -150), MED, Color3.fromRGB(80, 140, 200),
+		function() MovementController.SetSprint(true) end,
+		function() MovementController.SetSprint(false) end)
+
+	makeButton(gui, "Medkit", "АПТЕЧКА", UDim2.new(1, -215, 1, -350), MED, Color3.fromRGB(70, 160, 140),
+		function() Remotes.UseMedkitRequest:FireServer() end)
+
+	makeButton(gui, "Shop", "МАГАЗИН", UDim2.new(1, -120, 0, 90), MED, Color3.fromRGB(120, 80, 170),
+		function() ShopController.Toggle() end)
+
+	makeButton(gui, "Ability", "СПОСОБ.", UDim2.new(1, -120, 1, -450), MED, Color3.fromRGB(160, 70, 150),
+		function() BarricadeController.Ability() end)
+
+	-- Кнопки переключаются под роль: минимум лишнего на экране
+	RunService.Heartbeat:Connect(function()
+		local char = localPlayer.Character
+		local role = char and char:GetAttribute("Role")
+		local isSurv = role == "Survivor"
+
+		buttons.Carry.Visible = isSurv
+		buttons.Place.Visible = isSurv
+		buttons.Rotate.Visible = isSurv
+		buttons.Fix.Visible = isSurv
+		buttons.Remove.Visible = isSurv
+		buttons.Reload.Visible = isSurv
+		buttons.Swap.Visible = isSurv
+		buttons.Medkit.Visible = isSurv
+		buttons.Shop.Visible = isSurv
+		buttons.Interact.Visible = isSurv
+		buttons.Ability.Visible = role == "Zombie"
+		buttons.Fire.Visible = isSurv or role == "Zombie"
+		buttons.Fire.Text = if role == "Zombie" then "УДАР" else "ОГОНЬ"
+	end)
+end
+
+return MobileController

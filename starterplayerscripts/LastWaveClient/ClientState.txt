@@ -1,0 +1,71 @@
+--!nonstrict
+-- Один флаг на весь клиент: открыт ли блокирующий интерфейс.
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local Config = require(game.ReplicatedStorage.LastWaveShared.Config)
+
+local ClientState = {}
+
+local player = Players.LocalPlayer
+local locked = false
+local saved = nil
+
+ClientState.Changed = Instance.new("BindableEvent")
+
+function ClientState.IsUILocked(): boolean
+	return locked
+end
+
+function ClientState.ApplyMouseIcon()
+	if Config.MOUSE_ICON and Config.MOUSE_ICON ~= "" then
+		local mouse = player:GetMouse()
+		mouse.Icon = Config.MOUSE_ICON
+	end
+end
+
+function ClientState.SetUILock(on: boolean)
+	if on == locked then return end
+	locked = on
+
+	local camera = Workspace.CurrentCamera
+	local hum = player.Character and player.Character:FindFirstChildWhichIsA("Humanoid")
+
+	if on then
+		saved = {
+			behavior = UserInputService.MouseBehavior,
+			iconEnabled = UserInputService.MouseIconEnabled,
+			camType = camera and camera.CameraType,
+			autoRotate = hum and hum.AutoRotate,
+		}
+		-- мышь свободна, курсор твой, камера замирает
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
+		ClientState.ApplyMouseIcon()
+		if camera then camera.CameraType = Enum.CameraType.Scriptable end
+		if hum then hum.AutoRotate = false end
+	else
+		UserInputService.MouseBehavior = (saved and saved.behavior) or Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = if saved then saved.iconEnabled else true
+		if camera then camera.CameraType = (saved and saved.camType) or Enum.CameraType.Custom end
+		if hum then hum.AutoRotate = if saved then saved.autoRotate ~= false else true end
+		saved = nil
+	end
+
+	ClientState.Changed:Fire(locked)
+end
+
+function ClientState.Init()
+	ClientState.ApplyMouseIcon()
+	player.CharacterAdded:Connect(function()
+		task.wait(0.2)
+		ClientState.ApplyMouseIcon()
+		if locked then
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+			UserInputService.MouseIconEnabled = true
+		end
+	end)
+end
+
+return ClientState

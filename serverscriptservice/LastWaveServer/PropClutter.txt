@@ -1,0 +1,149 @@
+--!nonstrict
+-- Вещи, которые лежат НА пропе. Стул, а на нём коробки.
+-- Пока проп на месте: хлам приварен и анкорнут, физики ноль (бесплатно).
+-- Взял проп: хлам срывается, включается масса и коллизия. Игрок задел -> всё падает.
+
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+local Debris = game:GetService("Debris")
+
+local Config = require(game.ReplicatedStorage.LastWaveShared.Config)
+local C = Config.CLUTTER
+
+local PropClutter = {}
+local registered = {}   -- [prop] = { BasePart, ... }
+local active = {}       -- [part] = expireAt
+local activeCount = 0
+local debrisFolder: Folder
+
+local function isClutter(inst: Instance): boolean
+	if CollectionService:HasTag(inst, C.TagName) then return true end
+	if inst:GetAttribute("Clutter") == true then return true end
+	local cur = inst.Parent
+	while cur and cur ~= Workspace do
+		if cur.Name == C.FolderName then return true end
+		cur = cur.Parent
+	end
+	return false
+end
+
+-- Регистрируем при спавне пропа: хлам стоит на месте и ничего не считает.
+function PropClutter.Register(prop: Instance)
+	if not C.Enabled then return end
+	local list = {}
+	for _, d in prop:GetDescendants() do
+		if d:IsA("BasePart") and isClutter(d) then
+			d.Anchored = true
+			d.CanCollide = true
+			d.CanTouch = false
+			d.CastShadow = false
+			table.insert(list, d)
+		end
+	end
+	if #list > 0 then
+		registered[prop] = list
+		prop:SetAttribute("HasClutter", true)
+	end
+end
+
+function PropClutter.Forget(prop: Instance)
+	registered[prop] = nil
+end
+
+-- Взял проп -> хлам срывается в физику.
+function PropClutter.Release(prop: Instance)
+	if not C.Enabled then return end
+	local list = registered[prop]
+	if not list then return end
+	registered[prop] = nil
+	prop:SetAttribute("HasClutter", false)
+
+	local now = os.clock()
+	for _, part in list do
+		if not part.Parent then continue end
+		if activeCount >= C.MaxActive then
+			part:Destroy()
+			continue
+		end
+
+		-- Рвём все связи с пропом, иначе хлам уедет вместе с ним.
+		for _, j in part:GetChildren() do
+			if j:IsA("JointInstance") or j:IsA("WeldConstraint") or j:IsA("Constraint") then
+				j:Destroy()
+			end
+		end
+		for _, j in prop:GetDescendants() do
+			if (j:IsA("WeldConstraint") or j:IsA("JointInstance"))
+				and (j.Part0 == part or j.Part1 == part) then
+				j:Destroy()
+			end
+		end
+
+		local cf = part.CFrame
+		part.Parent = debrisFolder
+		part.CFrame = cf
+		part.Anchored = false
+		part.Massless = false
+		part.CanCollide = true
+		part.CanQuery = true
+		part.CollisionGroup = Config.GROUP_DEBRIS
+		part.CustomPhysicalProperties = PhysicalProperties.new(C.Density, 0.5, 0.35, 1, 1)
+		part.AssemblyLinearVelocity = Vector3.new(
+			(math.random() - 0.5) * C.DropImpulse,
+			0.5,
+			(math.random() - 0.5) * C.DropImpulse
+		)
+		part.AssemblyAngularVelocity = Vector3.new(
+			math.random(-3, 3), math.random(-3, 3), math.random(-3, 3)
+		)
+
+		active[part] = now + C.Lifetime
+		activeCount += 1
+	end
+end
+
+function PropClutter.ClearAll()
+	table.clear(registered)
+	for part in active do
+		if part.Parent then part:Destroy() end
+	end
+	table.clear(active)
+	activeCount = 0
+end
+
+function PropClutter.Init()
+	debrisFolder = Workspace:FindFirstChild("BarricadeDebris")
+	if not debrisFolder then
+		debrisFolder = Instance.new("Folder")
+		debrisFolder.Name = "BarricadeDebris"
+		debrisFolder.Parent = Workspace
+	end
+
+	-- 10 Гц вместо каждого кадра: анти-флинг и уборка.
+	task.spawn(function()
+		while true do
+			task.wait(0.1)
+			local now = os.clock()
+			for part, expire in active do
+				if not part.Parent then
+					active[part] = nil
+					activeCount -= 1
+					continue
+				end
+				if now > expire or part.Position.Y < -150 then
+					active[part] = nil
+					activeCount -= 1
+					part:Destroy()
+					continue
+				end
+				local v = part.AssemblyLinearVelocity
+				if v.Magnitude > C.MaxSpeed then
+					part.AssemblyLinearVelocity = v.Unit * C.MaxSpeed
+				end
+			end
+		end
+	end)
+end
+
+return PropClutter

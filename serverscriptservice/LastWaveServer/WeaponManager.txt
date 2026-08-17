@@ -1,0 +1,755 @@
+--!nonstrict
+
+-- Оружие: слоты, модель в руках, патроны, перезарядка, попадания.
+
+-- Клиент только целится и рисует. Все цифры считает сервер.
+
+local Players = game:GetService("Players")
+
+local Workspace = game:GetService("Workspace")
+
+
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+
+local Config = require(Shared.Config)
+
+local Remotes = require(Shared.Remotes)
+
+local Sanity = require(Shared.Sanity)
+
+local Weapons = require(Shared.WeaponTypes)
+
+local Kits = require(Shared.SurvivorKits)
+
+
+
+local AntiCheat = require(script.Parent.AntiCheat)
+
+local MatchState = require(script.Parent.MatchState)
+
+local WeaponRig = require(script.Parent.WeaponRig)
+
+
+
+local WeaponManager = {}
+
+
+
+local inv = {} -- [player] = { Active, Tier, Slots = { Primary = {...}, Secondary = {...} } }
+
+local rng = Random.new(os.clock() * 1e6)
+
+local FIRE_PHASES = { Preparation = true, Wave = true, Transition = true, Evacuation = true }
+
+
+
+local function ensure(player: Player)
+
+	inv[player] = inv[player] or { Active = "Primary", Tier = 1, Slots = {} }
+
+	return inv[player]
+
+end
+
+
+
+-- ── стейт клиенту ─────────────────────────────────────────────────────
+
+local function slotPayload(slot, tier)
+
+	if not slot then return nil end
+
+	local def = Weapons.Get(slot.Id)
+
+	if not def then return nil end
+
+	return {
+
+		Id = slot.Id, Def = def, Ammo = slot.Ammo, Reserve = slot.Reserve,
+
+		Mag = Weapons.MagSize(slot.Id, tier), Reloading = slot.Reloading or false,
+
+		ReserveMax = def.ReserveMax,
+
+	}
+
+end
+
+
+
+local function push(player: Player)
+
+	if not player.Parent then return end
+
+	local d = inv[player]
+
+	if not d then
+
+		-- ВАЖНО: пустой стейт тоже отправляем, иначе HUD врёт после превращения
+
+		Remotes.WeaponState:FireClient(player, { Empty = true, Slots = {} })
+
+		return
+
+	end
+
+	local payload = {
+
+		Active = d.Active, Tier = d.Tier,
+
+		Slots = {
+
+			Primary = slotPayload(d.Slots.Primary, d.Tier),
+
+			Secondary = slotPayload(d.Slots.Secondary, d.Tier),
+
+		},
+
+	}
+
+	local a = slotPayload(d.Slots[d.Active], d.Tier)
+
+	if a then
+
+		payload.Id, payload.Def = a.Id, a.Def
+
+		payload.Ammo, payload.Reserve = a.Ammo, a.Reserve
+
+		payload.Mag, payload.Reloading = a.Mag, a.Reloading
+
+	else
+
+		payload.Empty = true
+
+	end
+
+	Remotes.WeaponState:FireClient(player, payload)
+
+end
+
+
+
+-- ── выдача ────────────────────────────────────────────────────────────
+
+function WeaponManager.Give(player: Player, id: string, tier: number?)
+
+	local def = Weapons.Get(id)
+
+	if not def then return end
+
+	local d = ensure(player)
+
+	if tier then d.Tier = math.clamp(tier, 1, 3) end
+
+
+
+	local slotName = def.Slot
+
+	local prev = d.Slots[slotName]
+
+	local mag = Weapons.MagSize(id, d.Tier)
+
+
+
+	d.Slots[slotName] = {
+
+		Id = id,
+
+		Ammo = mag,
+
+		-- при замене ствола часть резерва конвертится, а не испаряется
+
+		Reserve = math.min(def.ReserveMax,
+
+			def.Reserve + (if prev then math.floor(prev.Reserve * Config.WEAPON_RESERVE_CARRY) else 0)),
+
+		LastFire = 0, Reloading = false, ReloadId = 0, Slot = slotName,
+
+	}
+
+	d.Active = slotName
+
+	WeaponRig.Attach(player, id)
+
+	Remotes.WeaponFx:FireAllClients(player, "Equip", id)
+
+	push(player)
+
+end
+
+
+
+-- Стартовый комплект: ствол кита + бэкап. Пустых рук не бывает.
+
+function WeaponManager.GiveLoadout(player: Player, kitName: string?)
+
+	local kit = Kits[kitName or "Builder"] or Kits.Builder
+
+	local d = ensure(player)
+
+	d.Tier = 1
+
+	d.Slots = {}
+
+
+
+	local backup = Config.WEAPON_BACKUP or "Uzi"
+
+	WeaponManager.Give(player, backup, 1)
+
+	if kit.StartWeapon and kit.StartWeapon ~= backup then
+
+		WeaponManager.Give(player, kit.StartWeapon, 1)
+
+	end
+
+	d.Active = if d.Slots.Primary then "Primary" else "Secondary"
+
+	local active = d.Slots[d.Active]
+
+	if active then
+
+		WeaponRig.Attach(player, active.Id)
+
+		Remotes.WeaponFx:FireAllClients(player, "Equip", active.Id)
+
+	end
+
+	push(player)
+
+end
+
+
+
+function WeaponManager.Clear(player: Player)
+
+	local d = inv[player]
+
+	if d then
+
+		for _, slot in d.Slots do slot.ReloadId = (slot.ReloadId or 0) + 1 end
+
+	end
+
+	inv[player] = nil
+
+	WeaponRig.Detach(player.Character)
+
+	push(player) -- клиент реально узнаёт, что стволов нет
+
+end
+
+
+
+function WeaponManager.GetTier(player: Player): number
+
+	local d = inv[player]
+
+	return if d then d.Tier else 1
+
+end
+
+
+
+function WeaponManager.SetTier(player: Player, tier: number)
+
+	local d = inv[player]
+
+	if not d then return end
+
+	d.Tier = math.clamp(tier, 1, 3)
+
+	-- апгрейд обязан сразу расширить магазин, иначе покупка "не работает"
+
+	for _, slot in d.Slots do
+
+		local mag = Weapons.MagSize(slot.Id, d.Tier)
+
+		if slot.Ammo < mag then
+
+			local take = math.min(mag - slot.Ammo, slot.Reserve)
+
+			slot.Ammo += take
+
+			slot.Reserve -= take
+
+		end
+
+	end
+
+	push(player)
+
+end
+
+
+
+function WeaponManager.GetId(player: Player): string?
+
+	local d = inv[player]
+
+	local slot = d and d.Slots[d.Active]
+
+	return slot and slot.Id
+
+end
+
+
+
+function WeaponManager.GetInventory(player: Player)
+
+	local d = inv[player]
+
+	if not d then return {} end
+
+	local out = {}
+
+	for name, slot in d.Slots do out[name] = slot.Id end
+
+	return out
+
+end
+
+
+
+function WeaponManager.HasWeapon(player: Player, id: string): boolean
+
+	local d = inv[player]
+
+	if not d then return false end
+
+	for _, slot in d.Slots do
+
+		if slot.Id == id then return true end
+
+	end
+
+	return false
+
+end
+
+
+
+local function slotById(player: Player, id: string?)
+
+	local d = inv[player]
+
+	if not d then return nil end
+
+	local targetId = id or WeaponManager.GetId(player)
+
+	for _, slot in d.Slots do
+
+		if slot.Id == targetId then return slot end
+
+	end
+
+	return nil
+
+end
+
+
+
+-- сколько патронов реально влезет: магазин не должен брать деньги за воздух
+
+function WeaponManager.AmmoRoom(player: Player, id: string?): number
+
+	local slot = slotById(player, id)
+
+	if not slot then return 0 end
+
+	local def = Weapons.Get(slot.Id)
+
+	if not def then return 0 end
+
+	return math.max(0, def.ReserveMax - slot.Reserve)
+
+end
+
+
+
+function WeaponManager.AddAmmo(player: Player, amount: number, id: string?): number
+
+	local slot = slotById(player, id)
+
+	if not slot then return 0 end
+
+	local def = Weapons.Get(slot.Id)
+
+	if not def then return 0 end
+
+	local added = math.min(amount, def.ReserveMax - slot.Reserve)
+
+	if added <= 0 then push(player); return 0 end
+
+	slot.Reserve += added
+
+	push(player)
+
+	return added
+
+end
+
+
+
+-- ── условия стрельбы ──────────────────────────────────────────────────
+
+local function canShoot(player: Player): boolean
+
+	if not FIRE_PHASES[MatchState.Phase()] then return false end -- в лобби и на итогах не стреляем
+
+	local char = player.Character
+
+	if not char then return false end
+
+	if char:GetAttribute("Role") ~= "Survivor" then return false end
+
+	if char:GetAttribute("Downed") then return false end
+
+	local hum = char:FindFirstChildWhichIsA("Humanoid")
+
+	return hum ~= nil and hum.Health > 0
+
+end
+
+
+
+local function startReload(player: Player)
+
+	local d = inv[player]
+
+	if not d then return end
+
+	local slotName = d.Active
+
+	local slot = d.Slots[slotName]
+
+	if not slot or slot.Reloading then return end
+
+	local def = Weapons.Get(slot.Id)
+
+	if not def then return end
+
+	local mag = Weapons.MagSize(slot.Id, d.Tier)
+
+	if slot.Ammo >= mag then return end
+
+	if slot.Reserve <= 0 then
+
+		Remotes.Notify:FireClient(player, "noAmmo")
+
+		return
+
+	end
+
+
+
+	slot.Reloading = true
+
+	slot.ReloadId = (slot.ReloadId or 0) + 1
+
+	local token = slot.ReloadId
+
+	push(player)
+
+	Remotes.WeaponFx:FireAllClients(player, "Reload", slot.Id, def.ReloadTime)
+
+
+
+	task.delay(def.ReloadTime, function()
+
+		local dd = inv[player]
+
+		if not dd then return end
+
+		local s = dd.Slots[slotName]
+
+		if not s or s ~= slot or s.ReloadId ~= token then return end -- смена ствола/смерть отменяют
+
+		local need = Weapons.MagSize(s.Id, dd.Tier) - s.Ammo
+
+		local take = math.min(need, s.Reserve)
+
+		s.Ammo += take
+
+		s.Reserve -= take
+
+		s.Reloading = false
+
+		push(player)
+
+	end)
+
+end
+
+
+
+-- ── трассировка с пробитием союзников ─────────────────────────────────
+
+local function castPellet(char: Model, origin: Vector3, aim: Vector3, def)
+
+	local filter = { char }
+
+	local pos, remaining = origin, def.Range
+
+	for _ = 1, 4 do
+
+		local params = RaycastParams.new()
+
+		params.FilterType = Enum.RaycastFilterType.Exclude
+
+		params.FilterDescendantsInstances = filter
+
+		params.RespectCanCollide = true
+
+		local res = Workspace:Raycast(pos, aim * remaining, params)
+
+		if not res then return pos + aim * remaining, nil end
+
+
+
+		local model = res.Instance:FindFirstAncestorWhichIsA("Model")
+
+		local role = model and model:GetAttribute("Role")
+
+		if role == "Survivor" or role == "Escaped" or role == "Lobby" then
+
+			-- союзник больше не бетонная стена для твоих пуль
+
+			table.insert(filter, model)
+
+			remaining -= (res.Position - pos).Magnitude
+
+			pos = res.Position
+
+			if remaining <= 0 then return pos, nil end
+
+		else
+
+			return res.Position, res
+
+		end
+
+	end
+
+	return pos, nil
+
+end
+
+
+
+local function onFire(player: Player, dir: any)
+
+	if not Sanity.unitVec(dir) then
+
+		AntiCheat.Flag(player, "fire: мусорный вектор", 3)
+
+		return
+
+	end
+
+	if not canShoot(player) then return end
+
+	local d = inv[player]
+
+	if not d then return end
+
+	local slot = d.Slots[d.Active]
+
+	if not slot then
+
+		Remotes.Notify:FireClient(player, "noWeapon")
+
+		return
+
+	end
+
+	if slot.Reloading then return end
+
+
+
+	local def = Weapons.Get(slot.Id)
+
+	if not def then return end
+
+
+
+	local now = os.clock()
+
+	if now - slot.LastFire < def.FireRate - Config.AC.CooldownSlack then
+
+		AntiCheat.Flag(player, "rapidfire", 2)
+
+		return
+
+	end
+
+	if slot.Ammo <= 0 then
+
+		Remotes.WeaponFx:FireClient(player, player, "Empty", slot.Id)
+
+		if Config.AUTO_RELOAD then startReload(player) end
+
+		return
+
+	end
+
+
+
+	slot.LastFire = now
+
+	slot.Ammo -= 1
+
+
+
+	local char = player.Character
+
+	local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+
+	if not head then return end
+
+	local origin = head.Position
+
+	local dmgMult = Weapons.Tier(d.Tier).Damage
+
+
+
+	local PlayerManager = require(script.Parent.PlayerManager)
+
+	local BarricadeManager = require(script.Parent.BarricadeManager)
+
+	local ScoreManager = require(script.Parent.ScoreManager)
+
+
+
+	local hits = {}
+
+	for _ = 1, def.Pellets do
+
+		local spread = math.rad(def.SpreadDeg)
+
+		local aim = (CFrame.lookAt(Vector3.zero, dir)
+
+			* CFrame.Angles(rng:NextNumber(-spread, spread), rng:NextNumber(-spread, spread), 0)).LookVector
+
+
+
+		local hitPos, res = castPellet(char, origin, aim, def)
+
+		table.insert(hits, hitPos)
+
+		if not res then continue end
+
+
+
+		local inst = res.Instance
+
+		local model = inst:FindFirstAncestorWhichIsA("Model")
+
+		if model and model:GetAttribute("Role") == "Zombie" then
+
+			local dmg = def.Damage * dmgMult
+
+			if inst.Name == "Head" or (inst.Parent and inst.Parent.Name == "Head") then
+
+				dmg *= def.HeadshotMultiplier
+
+			end
+
+			local hum = model:FindFirstChildWhichIsA("Humanoid")
+
+			local wasAlive = hum ~= nil and hum.Health > 0
+
+			PlayerManager.ApplyDamage(model, dmg, player)
+
+			ScoreManager.Award(player, "ZombieHit")
+
+			if wasAlive and hum and hum.Health <= 0 then
+
+				ScoreManager.Award(player, "ZombieKill")
+
+			end
+
+		else
+
+			local prop = BarricadeManager.ResolveProp(inst)
+
+			if prop and def.PropDamageMultiplier > 0 then
+
+				BarricadeManager.DamageProp(prop, def.Damage * def.PropDamageMultiplier, nil)
+
+			end
+
+		end
+
+	end
+
+
+
+	push(player)
+
+	Remotes.WeaponFx:FireAllClients(player, "Fire", slot.Id, origin, hits)
+
+
+
+	if slot.Ammo <= 0 and Config.AUTO_RELOAD then
+
+		task.defer(startReload, player)
+
+	end
+
+end
+
+
+
+local function onSwitch(player: Player, slotName: any)
+
+	if not Sanity.str(slotName, 16) then return end
+
+	local d = inv[player]
+
+	if not d or not d.Slots[slotName] then return end
+
+	if d.Active == slotName then return end
+
+	if not canShoot(player) then return end
+
+
+
+	local prev = d.Slots[d.Active]
+
+	if prev then
+
+		prev.Reloading = false
+
+		prev.ReloadId = (prev.ReloadId or 0) + 1 -- отменяем перезарядку: дюпа патронов нет
+
+	end
+
+	d.Active = slotName
+
+	WeaponRig.Attach(player, d.Slots[slotName].Id)
+
+	Remotes.WeaponFx:FireAllClients(player, "Equip", d.Slots[slotName].Id)
+
+	push(player)
+
+end
+
+
+
+function WeaponManager.Init()
+
+	AntiCheat.Bind(Remotes.WeaponFireRequest, "WeaponFireRequest", onFire)
+
+	AntiCheat.Bind(Remotes.ReloadRequest, "ReloadRequest", function(p) startReload(p) end)
+
+	AntiCheat.Bind(Remotes.SwitchWeaponRequest, "SwitchWeaponRequest", onSwitch)
+
+	Players.PlayerRemoving:Connect(function(p) inv[p] = nil end)
+
+end
+
+
+
+return WeaponManager

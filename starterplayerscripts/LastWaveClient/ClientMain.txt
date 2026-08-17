@@ -1,0 +1,23 @@
+local S = script.Parent
+
+require(S.LoadingController).Init() -- первым: экран поверх всего
+
+require(S.ClientState).Init()
+
+require(S.CameraController).Init()
+
+require(S.MovementController).Init()
+
+require(S.WeaponAnimator).Init()
+
+require(S.BarricadeController).Init()
+
+require(S.BarricadeHUD).Init()
+
+require(S.WeaponController).Init()
+
+require(S.HUDController).Init()
+
+require(S.ShopController).Init()
+
+require(S.MobileController).Init()

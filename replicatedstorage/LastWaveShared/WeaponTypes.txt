@@ -1,0 +1,178 @@
+--!strict
+-- 4 ствола: Uzi, AK-47, UMP-45, MP5.
+-- Модель в ServerStorage.WeaponModels.<Model> должна содержать части:
+--   Root (опционально, создастся сам), Upper, Magazine, Trigger, ReloadNob
+-- Магазин считается ОДНОЙ функцией для сервера и клиента -> рассинхрона патронов нет.
+
+export type AnimSet = {
+	Equip: string, Idle: string, Walk: string, Run: string,
+	Jump: string, Fall: string, Fire: string, Reload: string,
+}
+export type SoundSet = {
+	Fire: string, Reload: string, Empty: string,
+	MagOut: string, MagIn: string, Nob: string,
+}
+export type PartNames = { Root: string, Upper: string, Magazine: string, Trigger: string, Nob: string }
+
+export type Mech = {
+	UpperTravel: number,   -- ход затвора назад (студы)
+	UpperReturn: number,   -- скорость возврата затвора
+	TriggerAngle: number,  -- поворот курка (градусы)
+	MagDropDist: number,   -- насколько магазин уезжает вниз
+	MagDropTilt: number,   -- наклон магазина при выпадении
+	NobTravel: number,     -- ход рукоятки взведения
+	Timeline: {
+		MagOut: number, MagGone: number, MagIn: number, MagSeated: number,
+		NobPull: number, NobBack: number,
+	},
+	BoltHoldOpen: boolean, -- затвор остаётся открытым при пустом магазине
+}
+
+export type Recoil = {
+	Kick: number, Rise: number, Roll: number,
+	Stiffness: number, Damping: number,
+	Camera: number, Sway: number,
+}
+
+export type WeaponDef = {
+	Name: string, Slot: string,
+	Damage: number, HeadshotMultiplier: number, FireRate: number,
+	MagSize: number, Reserve: number, ReserveMax: number, ReloadTime: number,
+	Range: number, Pellets: number, SpreadDeg: number,
+	PropDamageMultiplier: number, Auto: boolean,
+	AmmoPack: number, AmmoCost: { [string]: number },
+	Model: string, Grip: CFrame,
+	Parts: PartNames, Mech: Mech, Recoil: Recoil,
+	Anim: AnimSet, Sound: SoundSet,
+}
+
+local function grip(x: number, y: number, z: number, rx: number, ry: number): CFrame
+	return CFrame.new(x, y, z) * CFrame.Angles(math.rad(rx), math.rad(ry), 0)
+end
+
+local function parts(): PartNames
+	return { Root = "Root", Upper = "Upper", Magazine = "Magazine", Trigger = "Trigger", Nob = "ReloadNob" }
+end
+
+local Defs: { [string]: WeaponDef } = {
+
+	-- ── UZI: быстрый, дёрганый, слабый. Бэкап всем. ────────────────────
+	Uzi = {
+		Name = "Uzi", Slot = "Secondary",
+		Damage = 12, HeadshotMultiplier = 1.5, FireRate = 0.075,
+		MagSize = 32, Reserve = 160, ReserveMax = 320, ReloadTime = 1.9,
+		Range = 160, Pellets = 1, SpreadDeg = 3.2,
+		PropDamageMultiplier = 0.12, Auto = true,
+		AmmoPack = 96, AmmoCost = { Scrap = 35 },
+		Model = "Uzi", Grip = grip(0, -1.0, -0.45, -90, 90),
+		Parts = parts(),
+		Mech = {
+			UpperTravel = 0.22, UpperReturn = 34, TriggerAngle = 12,
+			MagDropDist = 1.5, MagDropTilt = 18, NobTravel = 0.20,
+			Timeline = { MagOut = 0.10, MagGone = 0.26, MagIn = 0.42, MagSeated = 0.62, NobPull = 0.72, NobBack = 0.88 },
+			BoltHoldOpen = false,
+		},
+		Recoil = { Kick = 0.055, Rise = 0.045, Roll = 0.022, Stiffness = 190, Damping = 17, Camera = 0.20, Sway = 0.010 },
+		Anim = { Equip = "", Idle = "", Walk = "rbxassetid://129076003309363", Run = "", Jump = "", Fall = "", Fire = "", Reload = "" },
+		Sound = { Fire = "", Reload = "", Empty = "", MagOut = "", MagIn = "", Nob = "" },
+	},
+
+	-- ── AK-47: больно, дорого, злая отдача. ───────────────────────────
+	AK47 = {
+		Name = "AK-47", Slot = "Primary",
+		Damage = 34, HeadshotMultiplier = 2.0, FireRate = 0.10,
+		MagSize = 30, Reserve = 150, ReserveMax = 300, ReloadTime = 2.6,
+		Range = 300, Pellets = 1, SpreadDeg = 2.1,
+		PropDamageMultiplier = 0.22, Auto = true,
+		AmmoPack = 90, AmmoCost = { Scrap = 60 },
+		Model = "AK47", Grip = grip(0, -1.25, -0.85, -90, 90),
+		Parts = parts(),
+		Mech = {
+			UpperTravel = 0.40, UpperReturn = 22, TriggerAngle = 16,
+			MagDropDist = 2.0, MagDropTilt = 26, NobTravel = 0.34,
+			Timeline = { MagOut = 0.08, MagGone = 0.24, MagIn = 0.44, MagSeated = 0.66, NobPull = 0.76, NobBack = 0.90 },
+			BoltHoldOpen = false,
+		},
+		Recoil = { Kick = 0.155, Rise = 0.130, Roll = 0.045, Stiffness = 130, Damping = 13, Camera = 0.60, Sway = 0.016 },
+		Anim = { Equip = "", Idle = "", Walk = "", Run = "", Jump = "", Fall = "", Fire = "", Reload = "" },
+		Sound = { Fire = "", Reload = "", Empty = "", MagOut = "", MagIn = "", Nob = "" },
+	},
+
+	-- ── UMP-45: медленный, тяжёлый, стабильный. ───────────────────────
+	UMP45 = {
+		Name = "UMP-45", Slot = "Primary",
+		Damage = 24, HeadshotMultiplier = 1.7, FireRate = 0.13,
+		MagSize = 25, Reserve = 150, ReserveMax = 275, ReloadTime = 2.3,
+		Range = 220, Pellets = 1, SpreadDeg = 2.3,
+		PropDamageMultiplier = 0.18, Auto = true,
+		AmmoPack = 75, AmmoCost = { Scrap = 45 },
+		Model = "UMP45", Grip = grip(0, -1.15, -0.70, -90, 90),
+		Parts = parts(),
+		Mech = {
+			UpperTravel = 0.34, UpperReturn = 24, TriggerAngle = 14,
+			MagDropDist = 1.8, MagDropTilt = 20, NobTravel = 0.28,
+			Timeline = { MagOut = 0.10, MagGone = 0.26, MagIn = 0.46, MagSeated = 0.66, NobPull = 0.78, NobBack = 0.92 },
+			BoltHoldOpen = true,
+		},
+		Recoil = { Kick = 0.115, Rise = 0.095, Roll = 0.032, Stiffness = 150, Damping = 15, Camera = 0.42, Sway = 0.014 },
+		Anim = { Equip = "", Idle = "", Walk = "rbxassetid://129076003309363", Run = "", Jump = "", Fall = "", Fire = "", Reload = "" },
+		Sound = { Fire = "", Reload = "", Empty = "", MagOut = "", MagIn = "", Nob = "" },
+	},
+
+	-- ── MP5: скорострельный, точный, мало урона. ──────────────────────
+	MP5 = {
+		Name = "MP5", Slot = "Primary",
+		Damage = 18, HeadshotMultiplier = 1.6, FireRate = 0.085,
+		MagSize = 30, Reserve = 180, ReserveMax = 330, ReloadTime = 2.1,
+		Range = 240, Pellets = 1, SpreadDeg = 1.7,
+		PropDamageMultiplier = 0.15, Auto = true,
+		AmmoPack = 90, AmmoCost = { Scrap = 48 },
+		Model = "MP5", Grip = grip(0, -1.15, -0.75, -90, 90),
+		Parts = parts(),
+		Mech = {
+			UpperTravel = 0.30, UpperReturn = 28, TriggerAngle = 13,
+			MagDropDist = 1.8, MagDropTilt = 22, NobTravel = 0.30,
+			Timeline = { MagOut = 0.10, MagGone = 0.24, MagIn = 0.44, MagSeated = 0.64, NobPull = 0.74, NobBack = 0.88 },
+			BoltHoldOpen = true,
+		},
+		Recoil = { Kick = 0.085, Rise = 0.070, Roll = 0.026, Stiffness = 165, Damping = 16, Camera = 0.30, Sway = 0.012 },
+		Anim = { Equip = "", Idle = "", Walk = "", Run = "", Jump = "", Fall = "", Fire = "", Reload = "" },
+		Sound = { Fire = "", Reload = "", Empty = "", MagOut = "", MagIn = "", Nob = "" },
+	},
+}
+
+local Tiers = {
+	[1] = { Damage = 1.00, Mag = 1.00 },
+	[2] = { Damage = 1.15, Mag = 1.20 },
+	[3] = { Damage = 1.32, Mag = 1.40 },
+}
+
+local M = {}
+M.Defs = Defs
+M.Tiers = Tiers
+
+function M.Get(id: string?): WeaponDef?
+	if type(id) ~= "string" then return nil end
+	return Defs[id]
+end
+
+function M.Tier(tier: number?)
+	return Tiers[math.clamp(tier or 1, 1, 3)]
+end
+
+function M.MagSize(id: string, tier: number?): number
+	local d = Defs[id]
+	if not d then return 0 end
+	return math.floor(d.MagSize * M.Tier(tier).Mag)
+end
+
+function M.SlotOf(id: string): string
+	local d = Defs[id]
+	return if d then d.Slot else "Primary"
+end
+
+function M.IsValidId(id: any): boolean
+	return type(id) == "string" and id ~= "" and id ~= "rbxassetid://" and id ~= "rbxassetid://0"
+end
+
+return M

@@ -1,0 +1,45 @@
+--!nonstrict
+-- Рост игроков и зомби из Config.SCALE. Работает и на R6, и на R15, и на кастомных ригах.
+local Config = require(game.ReplicatedStorage.LastWaveShared.Config)
+local RigScale = {}
+local S = Config.SCALE
+
+local function setScale(hum: Humanoid, name: string, value: number): boolean
+	local v = hum:FindFirstChild(name)
+	if v and v:IsA("NumberValue") then
+		v.Value = value
+		return true
+	end
+	return false
+end
+
+local function apply(model: Model, hum: Humanoid, height: number, width: number, head: number)
+	-- R15: официальные множители, анимации не ломаются.
+	local ok = setScale(hum, "BodyHeightScale", height)
+	if ok then
+		setScale(hum, "BodyWidthScale", width)
+		setScale(hum, "BodyDepthScale", width)
+		setScale(hum, "HeadScale", head)
+		return
+	end
+	-- R6 и кастомные риги: честный геометрический масштаб.
+	if math.abs(height - 1) < 0.01 then return end
+	local okScale = pcall(function() model:ScaleTo(height) end)
+	if okScale then
+		hum.HipHeight = hum.HipHeight * height
+	end
+end
+
+function RigScale.ApplyPlayer(model: Model, hum: Humanoid)
+	apply(model, hum, S.PlayerHeight, S.PlayerWidth, S.PlayerHead)
+end
+
+function RigScale.ApplyZombie(model: Model, hum: Humanoid, zType: string)
+	local per = (S.PerZombieClass and S.PerZombieClass[zType]) or 1
+	local h = S.ZombieHeight * per
+	apply(model, hum, h, S.ZombieWidth * per, 1)
+end
+
+function RigScale.Init() end
+
+return RigScale

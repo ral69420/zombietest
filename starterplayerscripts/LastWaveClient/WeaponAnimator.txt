@@ -1,0 +1,901 @@
+--!nonstrict
+
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- Анимации оружия. Два независимых слоя:
+
+--
+
+-- A) AnimationTrack по ТВОИМ ID: Equip / Idle / Walk / Run / Jump / Fall /
+
+-- Fire / Reload. Играет владелец, движок реплицирует всем сам.
+
+--
+
+-- B) Скриптованная механика ствола через Motor6D.C0: пружинная отдача,
+
+-- ход затвора (Upper), нажатие курка (Trigger), выпадение и вставка
+
+-- магазина (Magazine), рывок рукоятки (ReloadNob), покачивание при
+
+-- ходьбе. Считает КАЖДЫЙ клиент локально по событию WeaponFx, поэтому
+
+-- видно всем игрокам, а сетевого трафика ноль.
+
+--
+
+-- Если ID не заданы, слой A молча выключается, слой B работает всегда.
+
+-- ═══════════════════════════════════════════════════════════════════════
+
+local Players = game:GetService("Players")
+
+local RunService = game:GetService("RunService")
+
+local Workspace = game:GetService("Workspace")
+
+local Debris = game:GetService("Debris")
+
+
+
+local Shared = game.ReplicatedStorage:WaitForChild("LastWaveShared")
+
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+local Weapons = require(Shared:WaitForChild("WeaponTypes"))
+
+
+
+local WeaponAnimator = {}
+
+local localPlayer = Players.LocalPlayer
+
+local MovementController -- ленивый require: избегаем цикла зависимостей
+
+
+
+local tracks = {}
+
+local loadedId: string? = nil
+
+local locoState = ""
+
+local rigs = {}
+
+local camKick, camRise = 0, 0
+
+
+
+local function isValid(id) return Weapons.IsValidId(id) end
+
+
+
+-- ── A. треки владельца ────────────────────────────────────────────────
+
+local LOCOMOTION = { Idle = true, Walk = true, Run = true }
+
+local PRIORITY = {
+
+	Idle = Enum.AnimationPriority.Movement,
+
+	Walk = Enum.AnimationPriority.Movement,
+
+	Run = Enum.AnimationPriority.Movement,
+
+	Jump = Enum.AnimationPriority.Action,
+
+	Fall = Enum.AnimationPriority.Action,
+
+	Fire = Enum.AnimationPriority.Action2,
+
+	Equip = Enum.AnimationPriority.Action3,
+
+	Reload = Enum.AnimationPriority.Action3,
+
+}
+
+
+
+local function loadTracks(weaponId: string?)
+
+	for _, t in tracks do
+
+		if t.IsPlaying then t:Stop(0.1) end
+
+		t:Destroy()
+
+	end
+
+	table.clear(tracks)
+
+	loadedId = weaponId
+
+	locoState = ""
+
+
+
+	MovementController = MovementController or require(script.Parent.MovementController)
+
+
+
+	if not weaponId then
+
+		MovementController.SetLocomotionOverride(false)
+
+		return
+
+	end
+
+
+
+	local def = Weapons.Get(weaponId)
+
+	local char = localPlayer.Character
+
+	local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+
+	if not def or not animator then
+
+		MovementController.SetLocomotionOverride(false)
+
+		return
+
+	end
+
+
+
+	local hasLoco = false
+
+	for name, id in def.Anim do
+
+		if not isValid(id) then continue end
+
+		local a = Instance.new("Animation")
+
+		a.Name = "LW_" .. weaponId .. "_" .. name
+
+		a.AnimationId = id
+
+		local ok, track = pcall(function() return animator:LoadAnimation(a) end)
+
+		a:Destroy()
+
+		if not ok then
+
+			warn("[Оружие/анимации] " .. weaponId .. "." .. name .. ": " .. tostring(track))
+
+			continue
+
+		end
+
+		track.Priority = PRIORITY[name] or Enum.AnimationPriority.Action
+
+		track.Looped = LOCOMOTION[name] == true or name == "Fall"
+
+		tracks[name] = track
+
+		if LOCOMOTION[name] then hasLoco = true end
+
+	end
+
+
+
+	-- если у ствола есть свои Idle/Walk/Run, базовая локомоция отключается
+
+	MovementController.SetLocomotionOverride(hasLoco)
+
+	if tracks.Equip then tracks.Equip:Play(0.08) end
+
+end
+
+
+
+local function setLoco(state: string)
+
+	if state == locoState then return end
+
+	local prev = tracks[locoState]
+
+	if prev and prev.IsPlaying then prev:Stop(0.15) end
+
+	locoState = state
+
+	local t = tracks[state]
+
+	if t and not t.IsPlaying then t:Play(0.15) end
+
+end
+
+
+
+function WeaponAnimator.OnWeaponChanged(state)
+
+	local id = state and state.Id or nil
+
+	if id ~= loadedId then loadTracks(id) end
+
+end
+
+
+
+-- ── B. состояние механики ─────────────────────────────────────────────
+
+local function rigOf(player: Player)
+
+	local r = rigs[player]
+
+	if not r then
+
+		r = {
+
+			kickP = 0, kickV = 0, riseP = 0, riseV = 0, rollP = 0, rollV = 0,
+
+			bolt = 0, trigger = 0, reloadStart = -1, reloadDur = 0,
+
+			empty = false, magDropped = false, nobPlayed = false, magInPlayed = false,
+
+		}
+
+		rigs[player] = r
+
+	end
+
+	return r
+
+end
+
+
+
+local function spring(p, v, dt, stiffness, damping)
+
+	v += (-stiffness * p - damping * v) * dt
+
+	p += v * dt
+
+	return p, v
+
+end
+
+
+
+local function jointsOf(char: Model?)
+
+	local model = char and char:FindFirstChild("WeaponModel")
+
+	local root = model and model.PrimaryPart
+
+	if not root then return nil end
+
+	return {
+
+		Grip = char:FindFirstChild("WeaponGrip", true),
+
+		Upper = root:FindFirstChild("J_Upper"),
+
+		Magazine = root:FindFirstChild("J_Magazine"),
+
+		Trigger = root:FindFirstChild("J_Trigger"),
+
+		Nob = root:FindFirstChild("J_Nob"),
+
+		Root = root, Model = model,
+
+	}
+
+end
+
+
+
+local function base(joint): CFrame
+
+	if not joint then return CFrame.identity end
+
+	return joint:GetAttribute("BaseC0") or joint.C0
+
+end
+
+
+
+-- ── эффекты ───────────────────────────────────────────────────────────
+
+local function playSound(char: Model, id: string?, volume: number)
+
+	if not isValid(id) then return end
+
+	local model = char:FindFirstChild("WeaponModel")
+
+	local part = model and model.PrimaryPart
+
+	if not part then return end
+
+	local s = Instance.new("Sound")
+
+	s.SoundId = id
+
+	s.Volume = volume
+
+	s.RollOffMaxDistance = 150
+
+	s.PlaybackSpeed = 1 + (math.random() - 0.5) * 0.06 -- лёгкий разброс питча
+
+	s.Parent = part
+
+	s:Play()
+
+	Debris:AddItem(s, 5)
+
+end
+
+
+
+local function muzzleFlash(char: Model)
+
+	local model = char:FindFirstChild("WeaponModel")
+
+	local muzzle = model and model:FindFirstChild("Muzzle", true)
+
+	if not muzzle or not muzzle:IsA("Attachment") then return end
+
+	local cf = muzzle.WorldCFrame
+
+
+
+	local flash = Instance.new("Part")
+
+	flash.Size = Vector3.new(0.5, 0.5, 0.85)
+
+	flash.Shape = Enum.PartType.Ball
+
+	flash.Material = Enum.Material.Neon
+
+	flash.Color = Color3.fromRGB(255, 215, 130)
+
+	flash.Anchored, flash.CanCollide = true, false
+
+	flash.CanQuery, flash.CanTouch, flash.CastShadow = false, false, false
+
+	flash.CFrame = cf
+
+	flash.Parent = Workspace
+
+
+
+	local light = Instance.new("PointLight")
+
+	light.Brightness, light.Range, light.Color = 7, 16, flash.Color
+
+	light.Parent = flash
+
+	Debris:AddItem(flash, 0.045)
+
+
+
+	local shell = Instance.new("Part")
+
+	shell.Size = Vector3.new(0.1, 0.1, 0.22)
+
+	shell.Color = Color3.fromRGB(205, 170, 85)
+
+	shell.Material = Enum.Material.Metal
+
+	shell.CanCollide, shell.CanTouch, shell.CastShadow = false, false, false
+
+	shell.CFrame = cf * CFrame.new(0.15, 0, 0.7)
+
+	shell.AssemblyLinearVelocity = cf.RightVector * 8 + Vector3.new(0, 7, 0)
+
+	shell.AssemblyAngularVelocity = Vector3.new(math.random(-20, 20), math.random(-20, 20), math.random(-20, 20))
+
+	shell.Parent = Workspace
+
+	Debris:AddItem(shell, 1.4)
+
+end
+
+
+
+local function dropMagazine(char: Model, def)
+
+	local model = char:FindFirstChild("WeaponModel")
+
+	local mag = model and model:FindFirstChild(def.Parts.Magazine, true)
+
+	if not mag or not mag:IsA("BasePart") then return end
+
+	-- падает визуальный клон, оригинал уезжает по Motor6D
+
+	local ghost = mag:Clone()
+
+	ghost.Name = "MagGhost"
+
+	ghost.Anchored = false
+
+	ghost.CanCollide = true
+
+	ghost.CanQuery, ghost.CanTouch, ghost.CastShadow = false, false, false
+
+	ghost.Massless = false
+
+	for _, j in ghost:GetChildren() do
+
+		if j:IsA("JointInstance") or j:IsA("Constraint") or j:IsA("WeldConstraint") then j:Destroy() end
+
+	end
+
+	ghost.CFrame = mag.CFrame
+
+	ghost.AssemblyLinearVelocity = -mag.CFrame.UpVector * 6
+
+		+ Vector3.new(math.random(-2, 2), 0, math.random(-2, 2))
+
+	ghost.Parent = Workspace
+
+	Debris:AddItem(ghost, 4)
+
+end
+
+
+
+local function tracer(from: Vector3, to: Vector3)
+
+	local dist = (to - from).Magnitude
+
+	if dist <= 0.5 then return end
+
+	local t = Instance.new("Part")
+
+	t.Anchored, t.CanCollide = true, false
+
+	t.CanQuery, t.CanTouch, t.CastShadow = false, false, false
+
+	t.Material = Enum.Material.Neon
+
+	t.Color = Color3.fromRGB(255, 228, 150)
+
+	t.Transparency = 0.25
+
+	t.Size = Vector3.new(0.07, 0.07, dist)
+
+	t.CFrame = CFrame.lookAt(from + (to - from) * 0.5, to)
+
+	t.Parent = Workspace
+
+	Debris:AddItem(t, 0.05)
+
+end
+
+
+
+local function fireVisual(player: Player, def, char: Model)
+
+	local r = rigOf(player)
+
+	r.kickV += def.Recoil.Kick * 60
+
+	r.riseV += def.Recoil.Rise * 60
+
+	r.rollV += (math.random() - 0.5) * 2 * def.Recoil.Roll * 60
+
+	r.bolt = 1
+
+	r.trigger = 1
+
+	muzzleFlash(char)
+
+	playSound(char, def.Sound.Fire, 0.6)
+
+	if player == localPlayer then
+
+		camKick = math.min(camKick + def.Recoil.Camera, 2.2)
+
+		camRise = math.min(camRise + def.Recoil.Camera * 0.6, 1.4)
+
+		if tracks.Fire then tracks.Fire:Stop(0); tracks.Fire:Play(0.02) end
+
+	end
+
+end
+
+
+
+function WeaponAnimator.PlayFireLocal()
+
+	local def = Weapons.Get(loadedId)
+
+	local char = localPlayer.Character
+
+	if def and char then fireVisual(localPlayer, def, char) end
+
+end
+
+
+
+-- ── жизненный цикл ────────────────────────────────────────────────────
+
+function WeaponAnimator.Init()
+
+	localPlayer.CharacterAdded:Connect(function()
+
+		task.wait(0.45)
+
+		local id = loadedId
+
+		loadedId = nil
+
+		loadTracks(id)
+
+	end)
+
+
+
+	Remotes.WeaponFx.OnClientEvent:Connect(function(player, kind, weaponId, a, b)
+
+		local def = Weapons.Get(weaponId)
+
+		local char = player and player.Character
+
+		if not def or not char then return end
+
+		local r = rigOf(player)
+
+
+
+		if kind == "Fire" then
+
+			if player ~= localPlayer then
+
+				fireVisual(player, def, char) -- своё уже отыграли предиктивно
+
+			end
+
+			if typeof(a) == "Vector3" and type(b) == "table" then
+
+				for _, p in b do
+
+					if typeof(p) == "Vector3" then tracer(a, p) end
+
+				end
+
+			end
+
+
+
+		elseif kind == "Reload" then
+
+			r.reloadStart = os.clock()
+
+			r.reloadDur = tonumber(a) or def.ReloadTime
+
+			r.magDropped, r.nobPlayed, r.magInPlayed = false, false, false
+
+			playSound(char, def.Sound.Reload, 0.5)
+
+			if player == localPlayer and tracks.Reload then
+
+				tracks.Reload:Play(0.08)
+
+				if tracks.Reload.Length > 0 then
+
+					tracks.Reload:AdjustSpeed(tracks.Reload.Length / r.reloadDur)
+
+				end
+
+			end
+
+
+
+		elseif kind == "Equip" then
+
+			if player == localPlayer then loadTracks(weaponId) end
+
+			playSound(char, def.Sound.Nob, 0.35)
+
+			r.bolt = 1
+
+
+
+		elseif kind == "Empty" then
+
+			playSound(char, def.Sound.Empty, 0.55)
+
+			r.empty = def.Mech.BoltHoldOpen
+
+			r.trigger = 1
+
+		end
+
+	end)
+
+
+
+	-- ── один RenderStepped на механику всех стволов в кадре ───────────
+
+	RunService.RenderStepped:Connect(function(dt)
+
+		dt = math.min(dt, 1 / 30)
+
+
+
+		for _, player in Players:GetPlayers() do
+
+			local char = player.Character
+
+			local id = char and char:GetAttribute("WeaponId")
+
+			local def = Weapons.Get(id)
+
+			if not def then
+
+				rigs[player] = nil
+
+				continue
+
+			end
+
+			local J = jointsOf(char)
+
+			if not J then continue end
+
+
+
+			local r = rigOf(player)
+
+			local hum = char:FindFirstChildWhichIsA("Humanoid")
+
+			local mech, rec = def.Mech, def.Recoil
+
+
+
+			-- пружины отдачи
+
+			r.kickP, r.kickV = spring(r.kickP, r.kickV, dt, rec.Stiffness, rec.Damping)
+
+			r.riseP, r.riseV = spring(r.riseP, r.riseV, dt, rec.Stiffness, rec.Damping)
+
+			r.rollP, r.rollV = spring(r.rollP, r.rollV, dt, rec.Stiffness * 0.8, rec.Damping)
+
+
+
+			-- затвор и курок возвращаются
+
+			r.bolt = math.max(0, r.bolt - dt * mech.UpperReturn)
+
+			r.trigger = math.max(0, r.trigger - dt * 9)
+
+
+
+			-- таймлайн перезарядки
+
+			local magOut, nob, reloading = 0, 0, false
+
+			if r.reloadStart > 0 then
+
+				local t = (os.clock() - r.reloadStart) / math.max(r.reloadDur, 0.01)
+
+				if t >= 1 then
+
+					r.reloadStart = -1
+
+					r.empty = false
+
+					r.bolt = 1 -- досыл патрона
+
+				else
+
+					reloading = true
+
+					local tl = mech.Timeline
+
+					if t >= tl.MagOut and t <= tl.MagSeated then
+
+						if t < tl.MagGone then
+
+							magOut = (t - tl.MagOut) / math.max(tl.MagGone - tl.MagOut, 0.01)
+
+							if not r.magDropped then
+
+								r.magDropped = true
+
+								dropMagazine(char, def)
+
+								playSound(char, def.Sound.MagOut, 0.5)
+
+							end
+
+						elseif t < tl.MagIn then
+
+							magOut = 1 -- магазина нет в стволе
+
+						else
+
+							magOut = 1 - (t - tl.MagIn) / math.max(tl.MagSeated - tl.MagIn, 0.01)
+
+							if not r.magInPlayed then
+
+								r.magInPlayed = true
+
+								playSound(char, def.Sound.MagIn, 0.5)
+
+							end
+
+						end
+
+					end
+
+					if t >= tl.NobPull and t <= tl.NobBack then
+
+						local k = (t - tl.NobPull) / math.max(tl.NobBack - tl.NobPull, 0.01)
+
+						nob = math.sin(k * math.pi) -- дёрнул и отпустил
+
+						if not r.nobPlayed and k > 0.3 then
+
+							r.nobPlayed = true
+
+							playSound(char, def.Sound.Nob, 0.5)
+
+						end
+
+					end
+
+				end
+
+			end
+
+			magOut = math.clamp(magOut, 0, 1)
+
+
+
+			-- покачивание от движения
+
+			local speed = if hum then hum.MoveDirection.Magnitude * (hum.WalkSpeed / 16) else 0
+
+			local swayAmt = rec.Sway * math.min(speed, 1.6)
+
+			local swayX = math.sin(os.clock() * 7.5) * swayAmt
+
+			local swayY = math.cos(os.clock() * 3.7) * swayAmt * 0.7
+
+
+
+			-- ГРИП: отдача назад, подброс, крен, покачивание, наклон при перезарядке
+
+			if J.Grip then
+
+				local reloadCF = CFrame.new(0, -0.30 * (if reloading then 1 else 0), 0)
+
+					* CFrame.Angles(
+
+						math.rad(-40) * (if reloading then 1 else 0),
+
+						0,
+
+						math.rad(20) * (if reloading then 1 else 0)
+
+					)
+
+				J.Grip.C0 = base(J.Grip)
+
+					* reloadCF
+
+					* CFrame.new(swayY, swayX, r.kickP)
+
+					* CFrame.Angles(r.riseP, 0, r.rollP)
+
+			end
+
+
+
+			-- ЗАТВОР: ход назад при выстреле, застывает открытым при пустом магазине
+
+			if J.Upper then
+
+				local travel = math.max(r.bolt, if r.empty then 1 else 0) * mech.UpperTravel
+
+				J.Upper.C0 = base(J.Upper) * CFrame.new(0, 0, travel)
+
+			end
+
+
+
+			-- КУРОК: поворот при нажатии
+
+			if J.Trigger then
+
+				J.Trigger.C0 = base(J.Trigger)
+
+					* CFrame.Angles(math.rad(mech.TriggerAngle) * r.trigger, 0, 0)
+
+			end
+
+
+
+			-- МАГАЗИН: уезжает вниз с наклоном, потом возвращается
+
+			if J.Magazine then
+
+				J.Magazine.C0 = base(J.Magazine)
+
+					* CFrame.new(0, -mech.MagDropDist * magOut, 0)
+
+					* CFrame.Angles(math.rad(mech.MagDropTilt) * magOut, 0, 0)
+
+			end
+
+
+
+			-- РУКОЯТКА ВЗВЕДЕНИЯ: рывок назад и обратно
+
+			if J.Nob then
+
+				local nobTravel = math.max(nob, r.bolt * 0.35) * mech.NobTravel
+
+				J.Nob.C0 = base(J.Nob) * CFrame.new(0, 0, nobTravel)
+
+			end
+
+		end
+
+
+
+		-- локомоция владельца по анимациям ствола
+
+		local char = localPlayer.Character
+
+		local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+
+		if hum and loadedId and (tracks.Idle or tracks.Walk or tracks.Run) then
+
+			local state = hum:GetState()
+
+			if state == Enum.HumanoidStateType.Jumping then
+
+				setLoco("Jump")
+
+			elseif state == Enum.HumanoidStateType.Freefall then
+
+				setLoco("Fall")
+
+			else
+
+				local root = char:FindFirstChild("HumanoidRootPart")
+
+				local v = if root then (root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)).Magnitude else 0
+
+				if v < 1 then setLoco("Idle")
+
+				elseif v <= 18 then setLoco("Walk")
+
+				else setLoco("Run") end
+
+			end
+
+		end
+
+
+
+		-- отдача камеры: через CameraOffset, не воюет с CameraController
+
+		if hum then
+
+			camKick *= math.exp(-dt * 9)
+
+			camRise *= math.exp(-dt * 9)
+
+			hum.CameraOffset = Vector3.new(0, camRise * 0.07, camKick * 0.13)
+
+		end
+
+	end)
+
+
+
+	Players.PlayerRemoving:Connect(function(p) rigs[p] = nil end)
+
+end
+
+
+
+return WeaponAnimator

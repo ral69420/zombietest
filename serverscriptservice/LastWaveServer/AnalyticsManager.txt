@@ -1,0 +1,33 @@
+--!nonstrict
+-- Воронка первых минут + экономика. Без этого метрики из доки мерить нечем.
+local AnalyticsService = game:GetService("AnalyticsService")
+
+local Analytics = {}
+local seen = {}
+
+function Analytics.Init() end
+
+function Analytics.Funnel(player: Player, step: number, name: string)
+	seen[player] = seen[player] or {}
+	if seen[player][step] then return end
+	seen[player][step] = true
+	pcall(function()
+		AnalyticsService:LogFunnelStepEvent(player, "Onboarding", nil, step, name)
+	end)
+end
+
+function Analytics.Custom(player: Player, name: string, fields: {[string]: any}?)
+	pcall(function()
+		AnalyticsService:LogCustomEvent(player, name, 1, fields)
+	end)
+end
+
+function Analytics.Economy(player: Player, flow: Enum.AnalyticsEconomyFlowType,
+	currency: string, amount: number, endBalance: number, reason: string)
+	pcall(function()
+		AnalyticsService:LogEconomyEvent(player, flow, currency, amount, endBalance,
+			Enum.AnalyticsEconomyTransactionType.Shop.Name, reason)
+	end)
+end
+
+return Analytics

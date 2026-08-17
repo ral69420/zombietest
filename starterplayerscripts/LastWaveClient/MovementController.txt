@@ -1,0 +1,165 @@
+--!nonstrict
+-- Базовая локомоция без оружия. Когда у ствола есть свои Idle/Walk/Run,
+-- WeaponAnimator вызывает SetLocomotionOverride(true) и этот модуль
+-- перестаёт трогать анимации: два слоя не дёргают персонажа одновременно.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("LastWaveShared")
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+local MovementController = {}
+local player = Players.LocalPlayer
+
+local sprintHeld = false
+local overridden = false
+local animationConnection: RBXScriptConnection? = nil
+local tracks = {}
+
+-- Базовые анимации персонажа (без оружия в руках)
+local ANIM_IDS = {
+	Idle = "",
+	Walk = "rbxassetid://98309539331707",
+	Run = "rbxassetid://89852405515904",
+	Jump = "",
+	Fall = "",
+}
+
+local function isValidAnimationId(id: string): boolean
+	return id ~= "" and id ~= "rbxassetid://" and id ~= "rbxassetid://0"
+end
+
+local function stopTrack(track: AnimationTrack?)
+	if track and track.IsPlaying then track:Stop(0.12) end
+end
+
+local function playTrack(track: AnimationTrack?)
+	if track and not track.IsPlaying then track:Play(0.12) end
+end
+
+local function stopAllTracks()
+	for _, t in tracks do stopTrack(t) end
+end
+
+function MovementController.SetLocomotionOverride(enabled: boolean)
+	overridden = enabled
+	if enabled then stopAllTracks() end
+end
+
+local function setupCharacter(character: Model)
+	if animationConnection then
+		animationConnection:Disconnect()
+		animationConnection = nil
+	end
+	table.clear(tracks)
+
+	local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
+	local root = character:WaitForChild("HumanoidRootPart", 10) :: BasePart?
+	if not humanoid or not root then return end
+
+	-- Стандартный Animate не отключаем: пустые ID -> дефолтные анимации Roblox
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = 50
+	humanoid.AutoRotate = true
+
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	for animationName, animationId in ANIM_IDS do
+		if not isValidAnimationId(animationId) then
+			continue -- пусто -> используется стандартная анимация
+		end
+		local animation = Instance.new("Animation")
+		animation.Name = "LastWave_" .. animationName
+		animation.AnimationId = animationId
+		local success, result = pcall(function()
+			return animator:LoadAnimation(animation)
+		end)
+		animation:Destroy()
+		if not success then
+			warn("[Анимации] " .. animationName .. ": " .. tostring(result))
+			continue
+		end
+		local track = result :: AnimationTrack
+		if animationName == "Jump" or animationName == "Fall" then
+			track.Priority = Enum.AnimationPriority.Action
+		else
+			track.Priority = Enum.AnimationPriority.Movement
+		end
+		track.Looped = animationName ~= "Jump"
+		tracks[animationName] = track
+	end
+
+	humanoid.StateChanged:Connect(function(_old, newState)
+		if overridden then return end
+		if newState == Enum.HumanoidStateType.Jumping then
+			stopTrack(tracks.Fall)
+			playTrack(tracks.Jump)
+		elseif newState == Enum.HumanoidStateType.Freefall then
+			stopTrack(tracks.Jump)
+			playTrack(tracks.Fall)
+		elseif newState == Enum.HumanoidStateType.Landed then
+			stopTrack(tracks.Jump)
+			stopTrack(tracks.Fall)
+		end
+	end)
+
+	animationConnection = RunService.RenderStepped:Connect(function()
+		if overridden then return end
+		if not character.Parent then return end
+		if humanoid.Health <= 0 then return end
+
+		local state = humanoid:GetState()
+		if state == Enum.HumanoidStateType.Jumping
+			or state == Enum.HumanoidStateType.Freefall then
+			stopTrack(tracks.Idle)
+			stopTrack(tracks.Walk)
+			stopTrack(tracks.Run)
+			return
+		end
+
+		local velocity = (root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)).Magnitude
+		if velocity < 1 then
+			playTrack(tracks.Idle); stopTrack(tracks.Walk); stopTrack(tracks.Run)
+		elseif velocity <= 18 then
+			stopTrack(tracks.Idle); playTrack(tracks.Walk); stopTrack(tracks.Run)
+		else
+			stopTrack(tracks.Idle); stopTrack(tracks.Walk); playTrack(tracks.Run)
+		end
+	end)
+end
+
+function MovementController.SetSprint(enabled: boolean)
+	if sprintHeld == enabled then return end
+	sprintHeld = enabled
+	Remotes.SprintRequest:FireServer(enabled)
+end
+
+function MovementController.Init()
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if input.KeyCode == Enum.KeyCode.LeftShift
+			or input.KeyCode == Enum.KeyCode.RightShift then
+			MovementController.SetSprint(true)
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.KeyCode == Enum.KeyCode.LeftShift
+			or input.KeyCode == Enum.KeyCode.RightShift then
+			MovementController.SetSprint(false)
+		end
+	end)
+
+	if player.Character then
+		task.spawn(setupCharacter, player.Character)
+	end
+	player.CharacterAdded:Connect(setupCharacter)
+end
+
+return MovementController

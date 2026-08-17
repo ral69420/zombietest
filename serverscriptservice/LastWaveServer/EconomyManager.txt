@@ -1,0 +1,108 @@
+--!nonstrict
+-- Scrap / Metal / Medkit (личные) + Fuel (командный). Всё считается только на сервере.
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+local Sanity = require(Shared.Sanity)
+local AntiCheat = require(script.Parent.AntiCheat)
+
+local EconomyManager = {}
+local res = {}           -- [player] = {Scrap=,Metal=,Medkit=}
+local gatherCd = {}      -- [player] = clock
+local nodeCd = {}        -- [node] = clock
+local teamFuel = 0
+
+local function push(player: Player)
+	Remotes.ResourcesChanged:FireClient(player, res[player], teamFuel)
+end
+
+function EconomyManager.Reset(player: Player)
+	res[player] = table.clone(Config.START_RESOURCES)
+	push(player)
+end
+
+function EconomyManager.ResetAll()
+	teamFuel = 0
+	for _, p in Players:GetPlayers() do EconomyManager.Reset(p) end
+end
+
+function EconomyManager.Get(player: Player, kind: string): number
+	local r = res[player]
+	return (r and r[kind]) or 0
+end
+
+function EconomyManager.Add(player: Player, tbl: {[string]: number})
+	local r = res[player]; if not r then return end
+	for k, v in tbl do
+		local cap = Config.RESOURCE_CAP[k] or 999
+		r[k] = math.clamp((r[k] or 0) + v, 0, cap)
+	end
+	push(player)
+end
+
+function EconomyManager.CanAfford(player: Player, cost: {[string]: number}): boolean
+	local r = res[player]; if not r then return false end
+	for k, v in cost do
+		if (r[k] or 0) < v then return false end
+	end
+	return true
+end
+
+function EconomyManager.Spend(player: Player, cost: {[string]: number}): boolean
+	if not EconomyManager.CanAfford(player, cost) then return false end
+	local r = res[player]
+	for k, v in cost do r[k] -= v end
+	push(player)
+	return true
+end
+
+function EconomyManager.GetFuel(): number return teamFuel end
+
+function EconomyManager.AddFuel(n: number)
+	teamFuel = math.clamp(teamFuel + n, 0, Config.FUEL_REQUIRED)
+	for _, p in Players:GetPlayers() do push(p) end
+end
+
+-- Сбор ресурсов из Workspace.ResourceNodes
+local function onGather(player: Player, node: Instance)
+	if not Sanity.inst(node, "BasePart") then return end
+	local char = player.Character
+	if not char or char:GetAttribute("Role") ~= "Survivor" or char:GetAttribute("Downed") then return end
+
+	local folder = Workspace:FindFirstChild("ResourceNodes")
+	if not folder or not node:IsDescendantOf(folder) then
+		AntiCheat.Flag(player, "gather: не ресурсная нода", 3); return
+	end
+	local now = os.clock()
+	if (gatherCd[player] or 0) + Config.GATHER_COOLDOWN > now then return end
+	if (nodeCd[node] or 0) + 0.4 > now then return end
+	if not AntiCheat.InRange(player, node, Config.AC.MaxInteractDistance) then return end
+	if not AntiCheat.HasLineOfSight(player, node) then return end
+
+	local left = node:GetAttribute("Remaining")
+	if left == nil then left = 40; node:SetAttribute("Remaining", left) end
+	if left <= 0 then return end
+
+	gatherCd[player] = now
+	nodeCd[node] = now
+
+	local kind = node:GetAttribute("ResourceType") or "Scrap"
+	local amount = math.min(Config.GATHER_AMOUNT[kind] or 8, left)
+	node:SetAttribute("Remaining", left - amount)
+	EconomyManager.Add(player, { [kind] = amount })
+
+	local ScoreManager = require(script.Parent.ScoreManager)
+	ScoreManager.Award(player, "ResourceGathered", amount)
+	Remotes.AbilityFx:FireAllClients("Gather", node.Position)
+end
+
+function EconomyManager.Init()
+	Players.PlayerAdded:Connect(function(p) EconomyManager.Reset(p) end)
+	Players.PlayerRemoving:Connect(function(p) res[p] = nil; gatherCd[p] = nil end)
+	for _, p in Players:GetPlayers() do EconomyManager.Reset(p) end
+	AntiCheat.Bind(Remotes.GatherRequest, "GatherRequest", onGather)
+end
+
+return EconomyManager

@@ -1,0 +1,1299 @@
+--!nonstrict
+
+-- Баррикады: свободный перенос и установка. Без сокетов.
+
+-- Правила безопасности не изменились:
+
+-- * проп в руках анкорнут, физики нет, позицию гонит сервер (флинг невозможен)
+
+-- * клиент присылает ТОЛЬКО направление взгляда и поворот. CFrame считает сервер
+
+-- * геометрия одна и та же у клиента и сервера (PlacementRules), поэтому
+
+-- зелёный призрак = гарантированная установка
+
+-- * в воздухе не закрепится: обязательна опора снизу
+
+
+
+local Players = game:GetService("Players")
+
+local Workspace = game:GetService("Workspace")
+
+local ServerStorage = game:GetService("ServerStorage")
+
+local RunService = game:GetService("RunService")
+
+local CollectionService = game:GetService("CollectionService")
+
+
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+
+local Config = require(Shared.Config)
+
+local Remotes = require(Shared.Remotes)
+
+local Sanity = require(Shared.Sanity)
+
+local PropTypes = require(Shared.PropTypes)
+
+local Kits = require(Shared.SurvivorKits)
+
+local Placement = require(Shared.PlacementRules)
+
+
+
+local AntiCheat = require(script.Parent.AntiCheat)
+
+local PhysicsSetup = require(script.Parent.PhysicsSetup)
+
+local EconomyManager = require(script.Parent.EconomyManager)
+
+local ScoreManager = require(script.Parent.ScoreManager)
+
+local MatchState = require(script.Parent.MatchState)
+
+local PropClutter = require(script.Parent.PropClutter)
+
+
+
+local BarricadeManager = {}
+
+local B = Config.BARRICADE
+
+local H = Config.HAMMER
+
+
+
+local propState = {} -- [prop] = { HP, MaxHP, BaseMaxHP, Nailed, PropType, Infected, PlacedBy, Size }
+
+local carryByPlayer = {} -- [player] = { Prop, Def }
+
+local carrierByProp = {} -- [prop] = player
+
+local repairCd = {}
+
+local dismantling = {} -- [player] = { Prop, Until }
+
+local placedByPlayer = {} -- [userId] = n
+
+local placedTotal = 0
+
+local propsFolder: Folder
+
+
+
+local BUILD_PHASES = {
+
+	Intermission = true, Preparation = true, Wave = true,
+
+	Transition = true, Evacuation = true,
+
+}
+
+
+
+-- ── helpers ───────────────────────────────────────────────────────────
+
+local function mainPart(prop: Instance): BasePart?
+
+	if prop:IsA("BasePart") then return prop end
+
+	if prop:IsA("Model") then
+
+		return prop.PrimaryPart or prop:FindFirstChildWhichIsA("BasePart")
+
+	end
+
+	return nil
+
+end
+
+
+
+local function eachPart(prop: Instance, fn)
+
+	if prop:IsA("BasePart") then fn(prop) end
+
+	for _, p in prop:GetDescendants() do
+
+		if p:IsA("BasePart") then fn(p) end
+
+	end
+
+end
+
+
+
+local function setAnchored(prop: Instance, on: boolean)
+
+	eachPart(prop, function(p) p.Anchored = on end)
+
+end
+
+
+
+local function setCollide(prop: Instance, on: boolean)
+
+	eachPart(prop, function(p) p.CanCollide = on end)
+
+end
+
+
+
+local function stageOf(ratio: number): number
+
+	if ratio > 0.8 then return 1
+
+	elseif ratio > 0.6 then return 2
+
+	elseif ratio > 0.35 then return 3
+
+	elseif ratio > 0.12 then return 4
+
+	else return 5 end
+
+end
+
+
+
+local function syncProp(prop: Instance)
+
+	local s = propState[prop]; if not s then return end
+
+	prop:SetAttribute("HP", math.floor(s.HP))
+
+	prop:SetAttribute("MaxHP", math.floor(s.MaxHP))
+
+	prop:SetAttribute("BaseMaxHP", math.floor(s.BaseMaxHP))
+
+	prop:SetAttribute("IsNailed", s.Nailed)
+
+	prop:SetAttribute("Stage", stageOf(s.HP / math.max(s.MaxHP, 1)))
+
+	prop:SetAttribute("Infected", s.Infected or false)
+
+	prop:SetAttribute("PlacedBy", s.PlacedBy)
+
+end
+
+
+
+local function kitOf(player: Player)
+
+	local char = player.Character
+
+	local kitName = char and char:GetAttribute("Kit")
+
+	return Kits[kitName or "Builder"] or Kits.Builder
+
+end
+
+
+
+local function isSurvivorReady(player: Player): boolean
+
+	local char = player.Character
+
+	if not char then return false end
+
+	if char:GetAttribute("Role") ~= "Survivor" then return false end
+
+	if char:GetAttribute("Downed") then return false end
+
+	local hum = char:FindFirstChildWhichIsA("Humanoid")
+
+	return hum ~= nil and hum.Health > 0
+
+end
+
+
+
+local function headOf(player: Player): BasePart?
+
+	local char = player.Character
+
+	if not char then return nil end
+
+	local h = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+
+	return (h and h:IsA("BasePart")) and h or nil
+
+end
+
+
+
+local function inReach(player: Player, prop: Instance, maxDist: number): boolean
+
+	local root = AntiCheat.GetRoot(player)
+
+	if not root then return false end
+
+	return Placement.ReachDistance(root.Position, prop) <= maxDist
+
+end
+
+
+
+local function markCarried(player: Player, prop: Instance?)
+
+	local char = player.Character
+
+	if not char then return end
+
+	local ref = char:FindFirstChild("CarriedProp")
+
+	if not ref then
+
+		ref = Instance.new("ObjectValue")
+
+		ref.Name = "CarriedProp"
+
+		ref.Parent = char
+
+	end
+
+	ref.Value = prop
+
+end
+
+
+
+-- Проп на земле, а не в воздухе. Дешёвая посадка одним рейкастом.
+
+local function settleToGround(prop: Instance)
+
+	local size = Placement.SizeOf(prop)
+
+	local cf = if prop:IsA("Model") then prop:GetBoundingBox() else (prop :: BasePart).CFrame
+
+	local rp = RaycastParams.new()
+
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+
+	rp.FilterDescendantsInstances = { prop, Workspace:FindFirstChild("BarricadeDebris") }
+
+	rp.RespectCanCollide = true
+
+	local hit = Workspace:Raycast(cf.Position + Vector3.new(0, 2, 0), Vector3.new(0, -200, 0), rp)
+
+	if not hit then return end
+
+	local _, _, _, r00, _, r02, _, _, _, r20, _, r22 = cf:GetComponents()
+
+	local yaw = math.atan2(-cf.LookVector.X, -cf.LookVector.Z)
+
+	Placement.ApplyCenter(
+
+		prop,
+
+		CFrame.new(hit.Position + Vector3.new(0, size.Y * 0.5 + 0.02, 0)) * CFrame.Angles(0, yaw, 0)
+
+	)
+
+end
+
+
+
+-- ── регистрация ───────────────────────────────────────────────────────
+
+function BarricadeManager.RegisterProp(item: Instance)
+
+	local part = mainPart(item)
+
+	if not part then return end
+
+
+
+	local key = tostring(item:GetAttribute("PropType") or item.Name)
+
+	local def = PropTypes[key]
+
+	if not def then
+
+		key = "WoodCrate"; def = PropTypes.WoodCrate
+
+	end
+
+
+
+	-- Размер считаем ОДИН раз и кладём в атрибут: клиент считает по нему же.
+
+	local size: Vector3
+
+	if item:IsA("Model") then
+
+		local _, s = item:GetBoundingBox()
+
+		size = s
+
+	else
+
+		size = part.Size
+
+	end
+
+	item:SetAttribute("PropSize", size)
+
+	item:SetAttribute("PropType", key)
+
+
+
+	propState[item] = {
+
+		HP = def.MaxHP, MaxHP = def.MaxHP, BaseMaxHP = def.MaxHP,
+
+		Nailed = false, PropType = key, Infected = false, PlacedBy = 0, Size = size,
+
+	}
+
+
+
+	CollectionService:AddTag(item, "BarricadeProp")
+
+	PhysicsSetup.SetPropGroup(item, false)
+
+	PropClutter.Register(item)
+
+	setAnchored(item, true)
+
+	setCollide(item, true)
+
+	settleToGround(item)
+
+	syncProp(item)
+
+end
+
+
+
+-- Сокеты больше не нужны. Оставлено, чтобы старые карты не падали.
+
+function BarricadeManager.RegisterSocket(socket: Instance)
+
+	if not socket:IsA("BasePart") then return end
+
+	socket.Anchored = true
+
+	socket.CanCollide = false
+
+	socket.Transparency = 1
+
+end
+
+
+
+function BarricadeManager.GetFreeSockets(): {BasePart} return {} end
+
+
+
+-- ── подъём и сброс ────────────────────────────────────────────────────
+
+local function releaseCarry(player: Player, keepPhysicsFlags: boolean?)
+
+	local c = carryByPlayer[player]
+
+	if not c then return nil end
+
+	carryByPlayer[player] = nil
+
+	carrierByProp[c.Prop] = nil
+
+	if c.Prop.Parent then
+
+		c.Prop:SetAttribute("CarriedBy", nil)
+
+		if not keepPhysicsFlags then
+
+			PhysicsSetup.SetPropGroup(c.Prop, false)
+
+			setCollide(c.Prop, true)
+
+		end
+
+	end
+
+	local char = player.Character
+
+	if char then char:SetAttribute("CarryMultiplier", 1) end
+
+	markCarried(player, nil)
+
+	return c
+
+end
+
+
+
+function BarricadeManager.TakeIntoHands(player: Player, prop: Instance): boolean
+
+	if carryByPlayer[player] then return false end
+
+	local s = propState[prop]
+
+	if not s or s.Nailed or carrierByProp[prop] then return false end
+
+
+
+	local def = PropTypes[s.PropType]
+
+	carryByPlayer[player] = { Prop = prop, Def = def }
+
+	carrierByProp[prop] = player
+
+
+
+	setAnchored(prop, true)
+
+	setCollide(prop, false)
+
+	PhysicsSetup.SetPropGroup(prop, true)
+
+	prop:SetAttribute("CarriedBy", player.UserId)
+
+	markCarried(player, prop)
+
+
+
+	-- Вещи, которые лежали сверху, срываются в физику.
+
+	PropClutter.Release(prop)
+
+	Remotes.ClutterFx:FireAllClients("Drop", (mainPart(prop) or prop).Position)
+
+
+
+	local kit = kitOf(player)
+
+	local mult = math.clamp(def.CarrySpeedMultiplier + kit.CarryBonus, 0.35, 1.0)
+
+	player.Character:SetAttribute("CarryMultiplier", mult)
+
+	Remotes.Notify:FireClient(player, "carry", s.PropType)
+
+	return true
+
+end
+
+
+
+local function onPickup(player: Player, prop: Instance)
+
+	if not Sanity.inst(prop, "Instance") then return end
+
+	if not isSurvivorReady(player) then return end
+
+	if carryByPlayer[player] then return end
+
+
+
+	local s = propState[prop]
+
+	if not s or not CollectionService:HasTag(prop, "BarricadeProp")
+
+		or not prop:IsDescendantOf(propsFolder) then
+
+		AntiCheat.Flag(player, "pickup: не баррикада (" .. prop.Name .. ")", 4)
+
+		return
+
+	end
+
+	if s.Nailed then
+
+		Remotes.Notify:FireClient(player, "nailedHint") -- "сними молотком"
+
+		return
+
+	end
+
+	if not inReach(player, prop, Config.AC.MaxInteractDistance) then return end
+
+
+
+	BarricadeManager.TakeIntoHands(player, prop)
+
+end
+
+
+
+local function onDrop(player: Player)
+
+	local c = releaseCarry(player)
+
+	if not c or not c.Prop.Parent then return end
+
+	local root = AntiCheat.GetRoot(player)
+
+	if not root then return end
+
+	local target = root.Position + root.CFrame.LookVector * 4
+
+	Placement.ApplyCenter(c.Prop, CFrame.new(target))
+
+	settleToGround(c.Prop)
+
+end
+
+
+
+-- ── установка ─────────────────────────────────────────────────────────
+
+local function limitFor(player: Player): number
+
+	return B.LimitPerPlayer + kitOf(player).ExtraPropLimit
+
+end
+
+
+
+local function onPlaceFree(player: Player, aimDir: any, yaw: any)
+
+	if not Sanity.unitVec(aimDir) then
+
+		AntiCheat.Flag(player, "place: мусорный вектор", 3)
+
+		return
+
+	end
+
+	if type(yaw) ~= "number" or yaw ~= yaw or math.abs(yaw) > 100 then yaw = 0 end
+
+	if not isSurvivorReady(player) then return end
+
+	if not BUILD_PHASES[MatchState.Phase()] then return end
+
+
+
+	local c = carryByPlayer[player]; if not c then return end
+
+	local head = headOf(player); if not head then return end
+
+
+
+	if (placedByPlayer[player.UserId] or 0) >= limitFor(player) then
+
+		Remotes.Notify:FireClient(player, "propLimit"); return
+
+	end
+
+	if placedTotal >= B.LimitTotal then
+
+		Remotes.Notify:FireClient(player, "propLimitTotal"); return
+
+	end
+
+
+
+	local cf, reason = Placement.Solve({
+
+		origin = head.Position,
+
+		dir = aimDir,
+
+		maxDist = B.MaxPlaceDistance,
+
+		size = propState[c.Prop].Size,
+
+		yaw = yaw,
+
+		ignore = { player.Character, c.Prop },
+
+	})
+
+	if not cf then
+
+		Remotes.Notify:FireClient(player, "placeFail", reason)
+
+		return
+
+	end
+
+
+
+	if next(c.Def.PlaceCost) and not EconomyManager.Spend(player, c.Def.PlaceCost) then
+
+		Remotes.Notify:FireClient(player, "noResources"); return
+
+	end
+
+
+
+	releaseCarry(player, true)
+
+	Placement.ApplyCenter(c.Prop, cf)
+
+	setAnchored(c.Prop, true)
+
+	setCollide(c.Prop, true)
+
+	PhysicsSetup.SetPropGroup(c.Prop, false)
+
+
+
+	local s = propState[c.Prop]
+
+	s.Nailed = true
+
+	s.PlacedBy = player.UserId
+
+	placedByPlayer[player.UserId] = (placedByPlayer[player.UserId] or 0) + 1
+
+	placedTotal += 1
+
+	syncProp(c.Prop)
+
+
+
+	ScoreManager.Award(player, "PropPlaced")
+
+	Remotes.PropFx:FireAllClients("Place", cf.Position, s.PropType)
+
+
+
+	local Analytics = require(script.Parent.AnalyticsManager)
+
+	Analytics.Funnel(player, 2, "first_barricade")
+
+end
+
+
+
+-- ── молоток: ремонт ───────────────────────────────────────────────────
+
+function BarricadeManager.Repair(player: Player, prop: Instance): boolean
+
+	if not Sanity.inst(prop, "Instance") then return false end
+
+	if not isSurvivorReady(player) then return false end
+
+
+
+	local s = propState[prop]
+
+	if not s or not s.Nailed then return false end
+
+	if s.Infected then Remotes.Notify:FireClient(player, "infected"); return false end
+
+	if s.HP >= s.MaxHP then Remotes.Notify:FireClient(player, "repairFull"); return false end
+
+
+
+	local now = os.clock()
+
+	if (repairCd[player] or 0) + H.RepairCooldown - Config.AC.CooldownSlack > now then return false end
+
+	if not inReach(player, prop, H.Reach) then return false end
+
+	if not EconomyManager.Spend(player, H.RepairCost) then
+
+		Remotes.Notify:FireClient(player, "noResources"); return false
+
+	end
+
+
+
+	repairCd[player] = now
+
+	local kit = kitOf(player)
+
+
+
+	-- Деградация максимума: вечный ремонт не работает, и игрок это ВИДИТ на полосе.
+
+	s.MaxHP = math.max(
+
+		s.BaseMaxHP * H.MinMaxHPRatio,
+
+		s.MaxHP - s.BaseMaxHP * H.DegradePerRepair
+
+	)
+
+	s.HP = math.clamp(s.HP + H.RepairAmount * kit.RepairMultiplier, 0, s.MaxHP)
+
+	syncProp(prop)
+
+
+
+	ScoreManager.Award(player, "PropRepaired")
+
+	local part = mainPart(prop)
+
+	if part then
+
+		Remotes.PropFx:FireAllClients("Repair", part.Position, s.HP / s.MaxHP)
+
+	end
+
+	return true
+
+end
+
+
+
+-- ── молоток: снятие (сервер сам держит таймер) ────────────────────────
+
+function BarricadeManager.BeginDismantle(player: Player, prop: Instance)
+
+	if not Sanity.inst(prop, "Instance") then return end
+
+	if not isSurvivorReady(player) then return end
+
+	local s = propState[prop]
+
+	if not s or not s.Nailed then return end
+
+	if H.OwnOnly and s.PlacedBy ~= player.UserId then
+
+		Remotes.Notify:FireClient(player, "notYours"); return
+
+	end
+
+	if not inReach(player, prop, H.Reach) then return end
+
+
+
+	dismantling[player] = { Prop = prop, Until = os.clock() + H.DismantleTime }
+
+	Remotes.ReviveProgress:FireClient(player, 0.01) -- переиспользуем полосу прогресса
+
+end
+
+
+
+function BarricadeManager.CancelDismantle(player: Player)
+
+	if dismantling[player] then
+
+		dismantling[player] = nil
+
+		Remotes.ReviveProgress:FireClient(player, 0)
+
+	end
+
+end
+
+
+
+local function unnail(prop: Instance)
+
+	local s = propState[prop]; if not s or not s.Nailed then return end
+
+	s.Nailed = false
+
+	s.Infected = false
+
+	if s.PlacedBy and s.PlacedBy ~= 0 then
+
+		placedByPlayer[s.PlacedBy] = math.max(0, (placedByPlayer[s.PlacedBy] or 1) - 1)
+
+	end
+
+	s.PlacedBy = 0
+
+	placedTotal = math.max(0, placedTotal - 1)
+
+	syncProp(prop)
+
+end
+
+
+
+local function finishDismantle(player: Player, prop: Instance)
+
+	local s = propState[prop]; if not s or not s.Nailed then return end
+
+	local def = PropTypes[s.PropType]
+
+
+
+	unnail(prop)
+
+
+
+	if next(def.PlaceCost) and H.DismantleRefund > 0 then
+
+		local back = {}
+
+		for k, v in def.PlaceCost do
+
+			back[k] = math.max(1, math.floor(v * H.DismantleRefund))
+
+		end
+
+		EconomyManager.Add(player, back)
+
+	end
+
+
+
+	local part = mainPart(prop)
+
+	if part then Remotes.PropFx:FireAllClients("Salvage", part.Position, s.PropType) end
+
+
+
+	-- Снял и сразу держишь в руках: минимум кликов, максимум понятности.
+
+	if H.DismantleToHands and not carryByPlayer[player] then
+
+		BarricadeManager.TakeIntoHands(player, prop)
+
+	else
+
+		settleToGround(prop)
+
+	end
+
+	Remotes.Notify:FireClient(player, "dismantled")
+
+end
+
+
+
+-- ── урон и разрушение ─────────────────────────────────────────────────
+
+function BarricadeManager.DamageProp(prop: Instance, damage: number, source: Player?)
+
+	local s = propState[prop]
+
+	if not s or not s.Nailed then return end
+
+	if not Sanity.num(damage, 0, 100000) then return end
+
+
+
+	s.HP = math.clamp(s.HP - damage, 0, s.MaxHP)
+
+	syncProp(prop)
+
+	local part = mainPart(prop)
+
+	if part then
+
+		Remotes.PropFx:FireAllClients("Damage", part.Position, s.HP / s.MaxHP)
+
+	end
+
+	if s.HP > 0 then return end
+
+
+
+	if source then ScoreManager.Award(source, "PropDestroyed") end
+
+	unnail(prop)
+
+
+
+	local def = PropTypes[s.PropType]
+
+	if part then
+
+		for _, p in Players:GetPlayers() do
+
+			local root = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+
+			if root and p.Character:GetAttribute("Role") == "Survivor"
+
+				and (root.Position - part.Position).Magnitude < 40 then
+
+				local yield = {}
+
+				for k, v in def.SalvageYield do
+
+					yield[k] = math.max(1, math.floor(v * Config.SALVAGE_RETURN_RATIO))
+
+				end
+
+				EconomyManager.Add(p, yield)
+
+			end
+
+		end
+
+		Remotes.PropFx:FireAllClients("Break", part.Position, s.PropType)
+
+	end
+
+
+
+	setCollide(prop, false)
+
+	task.delay(Config.PROP_DESPAWN_TIME, function()
+
+		PropClutter.Forget(prop)
+
+		if prop.Parent then prop:Destroy() end
+
+		propState[prop] = nil
+
+		carrierByProp[prop] = nil
+
+	end)
+
+end
+
+
+
+function BarricadeManager.InfectProp(prop: Instance, seconds: number)
+
+	local s = propState[prop]
+
+	if not s or not s.Nailed or s.Infected then return end
+
+	s.Infected = true
+
+	syncProp(prop)
+
+	task.spawn(function()
+
+		local left = seconds
+
+		while left > 0 and propState[prop] and propState[prop].Nailed do
+
+			task.wait(1)
+
+			left -= 1
+
+			BarricadeManager.DamageProp(prop, Config.SPIT_DOT, nil)
+
+		end
+
+		if propState[prop] then
+
+			propState[prop].Infected = false
+
+			syncProp(prop)
+
+		end
+
+	end)
+
+end
+
+
+
+-- ── доступ для AI и других модулей ────────────────────────────────────
+
+function BarricadeManager.IsNailedProp(inst: Instance): boolean
+
+	local s = propState[inst]
+
+	return s ~= nil and s.Nailed
+
+end
+
+
+
+function BarricadeManager.ResolveProp(inst: Instance): Instance?
+
+	local cur = inst
+
+	while cur and cur ~= Workspace do
+
+		if propState[cur] then return cur end
+
+		cur = cur.Parent
+
+	end
+
+	return nil
+
+end
+
+
+
+function BarricadeManager.GetNailedInSector(_sector: string): {Instance}
+
+	local out = {}
+
+	for prop, s in propState do
+
+		if s.Nailed and prop.Parent then table.insert(out, prop) end
+
+	end
+
+	return out
+
+end
+
+
+
+-- ── ресет карты ───────────────────────────────────────────────────────
+
+function BarricadeManager.ResetMap()
+
+	for player in carryByPlayer do releaseCarry(player) end
+
+	for prop in propState do
+
+		if prop.Parent then prop:Destroy() end
+
+	end
+
+	table.clear(propState)
+
+	table.clear(carrierByProp)
+
+	table.clear(placedByPlayer)
+
+	table.clear(dismantling)
+
+	placedTotal = 0
+
+	PropClutter.ClearAll()
+
+
+
+	local templates = ServerStorage:FindFirstChild("PropTemplates")
+
+	if not templates then
+
+		warn("[LastWave] ServerStorage.PropTemplates отсутствует, пропы не восстановлены")
+
+		return
+
+	end
+
+	local spawns = Workspace:FindFirstChild("PropSpawns")
+
+	if not spawns then
+
+		warn("[LastWave] Workspace.PropSpawns отсутствует")
+
+		return
+
+	end
+
+
+
+	-- Спавн порциями: 200 пропов больше не роняют первый кадр матча.
+
+	task.spawn(function()
+
+		local made = 0
+
+		for _, marker in spawns:GetDescendants() do
+
+			if not marker:IsA("BasePart") then continue end
+
+			local kind = tostring(marker:GetAttribute("PropType") or "WoodCrate")
+
+			local tpl = templates:FindFirstChild(kind)
+
+			if not tpl then
+
+				warn(("[Barricade] маркер '%s' просит шаблон '%s', его нет в ServerStorage.PropTemplates")
+
+					:format(marker.Name, kind))
+
+				continue
+
+			end
+
+			local clone = tpl:Clone()
+
+			clone:SetAttribute("PropType", kind)
+
+			clone.Parent = propsFolder
+
+			Placement.ApplyCenter(clone, marker.CFrame)
+
+			BarricadeManager.RegisterProp(clone)
+
+			made += 1
+
+			if made % 12 == 0 then task.wait() end
+
+		end
+
+	end)
+
+end
+
+
+
+-- ── heartbeat ─────────────────────────────────────────────────────────
+
+local function carryStep()
+
+	for player, c in carryByPlayer do
+
+		local root = AntiCheat.GetRoot(player)
+
+		if not root or not c.Prop.Parent then
+
+			releaseCarry(player)
+
+			continue
+
+		end
+
+		if Placement.ReachDistance(root.Position, c.Prop) > B.MaxCarryDistance then
+
+			onDrop(player)
+
+			continue
+
+		end
+
+		-- Только yaw: проп в руках больше не кувыркается вместе с камерой.
+
+		local look = root.CFrame.LookVector
+
+		local yaw = math.atan2(-look.X, -look.Z)
+
+		local basis = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+
+		Placement.ApplyCenter(c.Prop, basis * CFrame.new(B.CarryOffset))
+
+	end
+
+end
+
+
+
+local function dismantleStep()
+
+	local now = os.clock()
+
+	for player, job in dismantling do
+
+		local prop = job.Prop
+
+		if not player.Parent or not prop.Parent or not isSurvivorReady(player)
+
+			or not inReach(player, prop, H.Reach) or not BarricadeManager.IsNailedProp(prop) then
+
+			BarricadeManager.CancelDismantle(player)
+
+			continue
+
+		end
+
+		local left = job.Until - now
+
+		if left <= 0 then
+
+			dismantling[player] = nil
+
+			Remotes.ReviveProgress:FireClient(player, 0)
+
+			finishDismantle(player, prop)
+
+		else
+
+			Remotes.ReviveProgress:FireClient(player, 1 - left / H.DismantleTime)
+
+		end
+
+	end
+
+end
+
+
+
+function BarricadeManager.Init()
+
+	propsFolder = Workspace:FindFirstChild("BarricadeProps")
+
+	if not propsFolder then
+
+		propsFolder = Instance.new("Folder")
+
+		propsFolder.Name = "BarricadeProps"
+
+		propsFolder.Parent = Workspace
+
+	end
+
+
+
+	-- Сокеты, если они остались на карте, просто прячем.
+
+	local sockets = Workspace:FindFirstChild("BarricadeSockets")
+
+	if sockets then
+
+		for _, s in sockets:GetDescendants() do BarricadeManager.RegisterSocket(s) end
+
+	end
+
+	for _, i in propsFolder:GetChildren() do BarricadeManager.RegisterProp(i) end
+
+
+
+	AntiCheat.Bind(Remotes.PickupRequest, "PickupRequest", onPickup)
+
+	AntiCheat.Bind(Remotes.DropRequest, "DropRequest", onDrop)
+
+	AntiCheat.Bind(Remotes.PlaceFreeRequest, "PlaceFreeRequest", onPlaceFree)
+
+
+
+	-- старые ремоуты живы, чтобы ничего не отвалилось
+
+	AntiCheat.Bind(Remotes.RepairRequest, "RepairRequest", function(p, prop)
+
+		BarricadeManager.Repair(p, prop)
+
+	end)
+
+	AntiCheat.Bind(Remotes.PlaceRequest, "PlaceRequest", function() end)
+
+
+
+	RunService.Heartbeat:Connect(function()
+
+		local ok, err = pcall(carryStep)
+
+		if not ok then warn("[Barricade] carryStep: " .. tostring(err)) end
+
+		local ok2, err2 = pcall(dismantleStep)
+
+		if not ok2 then warn("[Barricade] dismantle: " .. tostring(err2)) end
+
+	end)
+
+
+
+	Players.PlayerRemoving:Connect(function(p)
+
+		releaseCarry(p); repairCd[p] = nil; dismantling[p] = nil
+
+	end)
+
+	local function hook(p: Player)
+
+		p.CharacterRemoving:Connect(function()
+
+			releaseCarry(p); dismantling[p] = nil
+
+		end)
+
+	end
+
+	Players.PlayerAdded:Connect(hook)
+
+	for _, p in Players:GetPlayers() do hook(p) end
+
+
+
+	task.defer(function()
+
+		if #propsFolder:GetChildren() == 0 then
+
+			local ok, err = pcall(BarricadeManager.ResetMap)
+
+			if not ok then warn("[Barricade] стартовый спавн упал: " .. tostring(err)) end
+
+		end
+
+	end)
+
+end
+
+
+
+return BarricadeManager 

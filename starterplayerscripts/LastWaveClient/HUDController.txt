@@ -1,0 +1,248 @@
+--!nonstrict
+-- Синк с сервером через GetGameState + серверное время (таймер не дрифтует).
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+
+local HUDController = {}
+local localPlayer = Players.LocalPlayer
+local WeaponController = require(script.Parent.WeaponController)
+
+local gui, topBar, objective, hpBar, staBar, resLabel, ammoLabel, downedFrame, reviveBar, notifyLabel
+local matchState = { Phase = "Intermission", Wave = 0, EndTime = 0, Objective = "Подключение…" }
+local resources, fuel = {}, 0
+
+local PHASE_TEXT = {
+	Intermission = "ОЖИДАНИЕ", Preparation = "СТРОЙКА", Wave = "АТАКА ЗОМБИ",
+	Transition = "ОТХОД", Evacuation = "ЭВАКУАЦИЯ", GameOver = "КОНЕЦ МАТЧА",
+}
+local PHASE_COLOR = {
+	Wave = Color3.fromRGB(255, 75, 75), Preparation = Color3.fromRGB(85, 255, 120),
+	Evacuation = Color3.fromRGB(120, 200, 255), Transition = Color3.fromRGB(255, 200, 90),
+}
+
+local NOTIFY_TEXT = {
+	noResources = "Не хватает ресурсов",
+	propLimit = "Лимит баррикад в секторе",
+	wrongSize = "Объект не влезает в этот проход",
+	wrongSector = "Это другой сектор",
+	infected = "Баррикада заражена, ремонт невозможен",
+	noMedkit = "Нет аптечки",
+	needFuel = "Нужна канистра топлива",
+	portalUnpowered = "Портал без питания",
+	shopClosed = "Этот товар сейчас недоступен",
+	alreadyOwned = "Уже куплено",
+	powerRestored = "ПИТАНИЕ ВОССТАНОВЛЕНО",
+	joinedAsSurvivor = "Ты выживший!",
+	joinedAsZombie = "Ты заходишь как зомби",
+	lobbyJoined = "Ждём начала матча",
+	fuelTaken = "Канистра взята: несите к панели",
+	noAmmo = "Патроны кончились! Купи в снабжении (B)",
+	ammoFull = "Резерв уже полон",
+	noWeapon = "Нет оружия",
+	placeFail = "Здесь не встанет",
+	propLimitTotal = "На карте слишком много баррикад",
+	dismantled = "Баррикада снята",
+	repairFull = "Уже целая",
+	notYours = "Это не твоя баррикада",
+	nailedHint = "Установлено: сними молотком (ПКМ)",
+	carry = "Несёшь предмет: ЛКМ поставить, R повернуть",
+}
+
+local function label(parent, size, pos, text, textSize)
+	local l = Instance.new("TextLabel")
+	l.Size = size; l.Position = pos; l.BackgroundTransparency = 1
+	l.TextColor3 = Color3.new(1, 1, 1); l.Font = Enum.Font.GothamBold
+	l.TextSize = textSize or 16; l.Text = text
+	l.TextStrokeTransparency = 0.4; l.Parent = parent
+	return l
+end
+
+local function bar(parent, pos, size, color)
+	local back = Instance.new("Frame")
+	back.Size = size; back.Position = pos
+	back.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+	back.BorderSizePixel = 0; back.Parent = parent
+	Instance.new("UICorner", back).CornerRadius = UDim.new(0, 4)
+
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.fromScale(1, 1); fill.BackgroundColor3 = color
+	fill.BorderSizePixel = 0; fill.Parent = back
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 4)
+	return fill
+end
+
+local function build()
+	gui = Instance.new("ScreenGui")
+	gui.Name = "LastWaveHUD"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 10
+	gui.Parent = localPlayer:WaitForChild("PlayerGui")
+
+	local top = Instance.new("Frame")
+	top.Size = UDim2.fromOffset(400, 58)
+	top.Position = UDim2.new(0.5, -200, 0, 12)
+	top.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+	top.BackgroundTransparency = 0.15
+	top.BorderSizePixel = 0
+	top.Parent = gui
+	Instance.new("UICorner", top).CornerRadius = UDim.new(0, 10)
+
+	topBar = label(top, UDim2.new(1, 0, 0, 30), UDim2.new(0, 0, 0, 2), "Подключение…", 18)
+	objective = label(top, UDim2.new(1, 0, 0, 22), UDim2.new(0, 0, 0, 32), "", 14)
+	objective.TextColor3 = Color3.fromRGB(200, 200, 210)
+
+	local bottom = Instance.new("Frame")
+	bottom.Size = UDim2.fromOffset(300, 120)
+	bottom.Position = UDim2.new(0, 18, 1, -138)
+	bottom.BackgroundTransparency = 1
+	bottom.Parent = gui
+
+	label(bottom, UDim2.fromOffset(300, 18), UDim2.fromOffset(0, 0), "HP", 13).TextXAlignment = Enum.TextXAlignment.Left
+	hpBar = bar(bottom, UDim2.fromOffset(0, 20), UDim2.fromOffset(230, 14), Color3.fromRGB(230, 70, 70))
+	label(bottom, UDim2.fromOffset(300, 18), UDim2.fromOffset(0, 38), "ЭНЕРГИЯ", 13).TextXAlignment = Enum.TextXAlignment.Left
+	staBar = bar(bottom, UDim2.fromOffset(0, 58), UDim2.fromOffset(230, 10), Color3.fromRGB(120, 200, 255))
+	resLabel = label(bottom, UDim2.fromOffset(300, 20), UDim2.fromOffset(0, 76), "", 14)
+	resLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+	ammoLabel = label(gui, UDim2.fromOffset(260, 60), UDim2.new(1, -280, 1, -90), "", 20)
+	ammoLabel.TextXAlignment = Enum.TextXAlignment.Right
+	ammoLabel.TextYAlignment = Enum.TextYAlignment.Bottom
+
+	notifyLabel = label(gui, UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 84), "", 16)
+	notifyLabel.TextColor3 = Color3.fromRGB(255, 220, 120)
+
+	downedFrame = Instance.new("Frame")
+	downedFrame.Size = UDim2.fromOffset(340, 76)
+	downedFrame.Position = UDim2.new(0.5, -170, 0.62, 0)
+	downedFrame.BackgroundColor3 = Color3.fromRGB(60, 10, 10)
+	downedFrame.BackgroundTransparency = 0.2
+	downedFrame.Visible = false
+	downedFrame.BorderSizePixel = 0
+	downedFrame.Parent = gui
+	Instance.new("UICorner", downedFrame).CornerRadius = UDim.new(0, 10)
+	label(downedFrame, UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 6), "ТЫ УПАЛ! Держись, тебя поднимут", 16)
+	reviveBar = bar(downedFrame, UDim2.new(0, 20, 0, 44), UDim2.new(1, -40, 0, 14), Color3.fromRGB(120, 255, 150))
+	reviveBar.Size = UDim2.fromScale(0, 1)
+end
+
+local function notify(text)
+	notifyLabel.Text = text
+	task.delay(3, function()
+		if notifyLabel.Text == text then notifyLabel.Text = "" end
+	end)
+end
+
+function HUDController.Init()
+	build()
+
+	task.spawn(function()
+		local ok, s = pcall(function() return Remotes.GetGameState:InvokeServer() end)
+		if ok and s then matchState = s end
+	end)
+
+	Remotes.StateChanged.OnClientEvent:Connect(function(s) matchState = s end)
+
+	Remotes.ResourcesChanged.OnClientEvent:Connect(function(r, f)
+		resources = r or {}
+		fuel = f or 0
+	end)
+
+	Remotes.Notify.OnClientEvent:Connect(function(kind, arg)
+		local text = NOTIFY_TEXT[kind]
+		if kind == "escaped" then text = arg .. " ушёл через портал!"
+		elseif kind == "sectorCollapse" then text = "Сектор рушится! Отходим!"
+		elseif kind == "fuelDelivered" then text = "Топливо: " .. tostring(arg) .. "/" .. Config.FUEL_REQUIRED
+		elseif kind == "emergencyButton" then text = arg .. " нажал аварийную кнопку!"
+		elseif kind == "purchased" then text = "Куплено"
+		elseif kind == "kitSet" then text = "Набор: " .. tostring(arg)
+		elseif kind == "classSet" then text = "Класс зомби: " .. tostring(arg)
+		elseif kind == "classLocked" then text = tostring(arg) .. " ещё закрыт"
+		elseif kind == "placeFail" then text = tostring(arg)
+		end
+		if text then notify(text) end
+	end)
+
+	Remotes.PlayerInfected.OnClientEvent:Connect(function(p, class)
+		if p == localPlayer then
+			notify("Ты стал зомби (" .. tostring(class) .. "). Ломай то, что строил.")
+		else
+			notify(p.DisplayName .. " превратился в зомби!")
+		end
+	end)
+
+	Remotes.PlayerDowned.OnClientEvent:Connect(function(p)
+		if p == localPlayer then downedFrame.Visible = true end
+	end)
+
+	Remotes.PlayerRevived.OnClientEvent:Connect(function(p, medic)
+		if p == localPlayer then downedFrame.Visible = false end
+		notify(medic.DisplayName .. " спас " .. p.DisplayName)
+	end)
+
+	Remotes.ReviveProgress.OnClientEvent:Connect(function(ratio)
+		reviveBar.Size = UDim2.fromScale(math.clamp(ratio, 0, 1), 1)
+	end)
+
+	Remotes.MatchSummary.OnClientEvent:Connect(function(sum)
+		local text = if sum.SurvivorsWon then "ВЫЖИВШИЕ УШЛИ" else "КОЛОНИЯ ПАЛА"
+		if sum.MVP then
+			text = text .. " | MVP: " .. sum.MVP.Name .. " (" .. sum.MVP.Score .. ")"
+		end
+		notify(text)
+	end)
+
+	RunService.RenderStepped:Connect(function()
+		local left = math.max(0, math.floor((matchState.EndTime or 0) - Workspace:GetServerTimeNow()))
+		local phase = PHASE_TEXT[matchState.Phase] or matchState.Phase
+
+		if (matchState.Wave or 0) > 0 then
+			topBar.Text = string.format("[%s] Волна %d/%d · %ds",
+				phase, matchState.Wave, Config.TOTAL_WAVES, left)
+		else
+			topBar.Text = string.format("[%s] %ds", phase, left)
+		end
+		topBar.TextColor3 = PHASE_COLOR[matchState.Phase] or Color3.new(1, 1, 1)
+		objective.Text = matchState.Objective or ""
+
+		local char = localPlayer.Character
+		local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+		if hum then
+			hpBar.Size = UDim2.fromScale(math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1), 1)
+		end
+		if char then
+			staBar.Size = UDim2.fromScale(
+				math.clamp((char:GetAttribute("Stamina") or 0) / Config.STAMINA_MAX, 0, 1), 1)
+			if not char:GetAttribute("Downed") then downedFrame.Visible = false end
+		end
+
+		resLabel.Text = string.format("Scrap %d · Metal %d · Аптечки %d · Топливо %d/%d",
+			resources.Scrap or 0, resources.Metal or 0, resources.Medkit or 0, fuel, Config.FUEL_REQUIRED)
+
+		-- патроны обоих слотов: видно, на что переключаешься
+		local ws = WeaponController.GetState()
+		if ws and ws.Def then
+			local other = if ws.Active == "Primary"
+				then (ws.Slots and ws.Slots.Secondary)
+				else (ws.Slots and ws.Slots.Primary)
+			local main = string.format("%s  %d / %d%s",
+				ws.Def.Name, ws.Ammo or 0, ws.Reserve or 0,
+				if ws.Reloading then "  (перезарядка)" else "")
+			if other and other.Def then
+				ammoLabel.Text = main .. "\n[X] " .. other.Def.Name .. "  "
+					.. other.Ammo .. " / " .. other.Reserve
+			else
+				ammoLabel.Text = main
+			end
+		else
+			ammoLabel.Text = if char and char:GetAttribute("Role") == "Survivor" then "БЕЗ ОРУЖИЯ" else ""
+		end
+	end)
+end
+
+return HUDController

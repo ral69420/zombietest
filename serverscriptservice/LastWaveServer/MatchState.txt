@@ -1,0 +1,43 @@
+--!nonstrict
+-- Единственный источник правды о фазе матча. GameManager пишет, все читают.
+local Workspace = game:GetService("Workspace")
+local Remotes = require(game.ReplicatedStorage.LastWaveShared.Remotes)
+
+local MatchState = {}
+
+local state = {
+	Phase = "Intermission",     -- Intermission|Preparation|Wave|Transition|Evacuation|GameOver
+	Wave = 0,
+	SectorIndex = 0,
+	SectorName = "",
+	EndTime = 0,                -- абсолютное серверное время (GetServerTimeNow)
+	Objective = "Ожидание игроков",
+	PortalPowered = false,
+	FuelDelivered = 0,
+}
+
+function MatchState.Init() end
+
+function MatchState.Get()
+	return table.clone(state)
+end
+
+function MatchState.Phase(): string return state.Phase end
+function MatchState.Wave(): number return state.Wave end
+function MatchState.SectorName(): string return state.SectorName end
+
+function MatchState.Set(fields: { [string]: any }, duration: number?)
+	for k, v in fields do state[k] = v end
+	if duration then state.EndTime = Workspace:GetServerTimeNow() + duration end
+	Remotes.StateChanged:FireAllClients(MatchState.Get())
+end
+
+function MatchState.TimeLeft(): number
+	return math.max(0, state.EndTime - Workspace:GetServerTimeNow())
+end
+
+function MatchState.PushTo(player: Player)
+	Remotes.StateChanged:FireClient(player, MatchState.Get())
+end
+
+return MatchState

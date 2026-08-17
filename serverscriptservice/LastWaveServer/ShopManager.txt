@@ -1,0 +1,222 @@
+--!nonstrict
+-- Магазин. Каталог живёт ЗДЕСЬ (ServerScriptService) - клиент его прочитать не может.
+-- Патроны привязаны к тому, что реально в руках, и продаются во время волны.
+local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ServerStorage = game:GetService("ServerStorage")
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+local Sanity = require(Shared.Sanity)
+local Weapons = require(Shared.WeaponTypes)
+
+local AntiCheat = require(script.Parent.AntiCheat)
+local EconomyManager = require(script.Parent.EconomyManager)
+local WeaponManager = require(script.Parent.WeaponManager)
+local DataManager = require(script.Parent.DataManager)
+local MatchState = require(script.Parent.MatchState)
+local Analytics = require(script.Parent.AnalyticsManager)
+
+local ShopManager = {}
+
+local owned = {} -- [player][itemId] = true (в пределах матча)
+
+-- Фазы доступности: оружие только в подготовке, расходники всегда
+local SHOP_PREP = { Intermission = true, Preparation = true, Transition = true }
+local SHOP_ANY  = { Intermission = true, Preparation = true, Transition = true, Wave = true, Evacuation = true }
+
+local CATALOG = {
+	{ id="w_mp5",     name="MP5",               kind="Weapon",   weapon="MP5",     cost={Scrap=120},          once=true, phases=SHOP_PREP },
+	{ id="w_ump45",   name="UMP-45",            kind="Weapon",   weapon="UMP45",   cost={Scrap=150,Metal=10}, once=true, phases=SHOP_PREP },
+	{ id="w_ak47",    name="AK-47",             kind="Weapon",   weapon="AK47",    cost={Scrap=210,Metal=25}, once=true, phases=SHOP_PREP },
+	{ id="u_tier2",   name="Апгрейд ствола II", kind="Upgrade",  tier=2,           cost={Scrap=120},          once=true, phases=SHOP_PREP },
+	{ id="u_tier3",   name="Апгрейд ствола III",kind="Upgrade",  tier=3,           cost={Scrap=180,Metal=20}, once=true, phases=SHOP_PREP },
+	{ id="r_medkit",  name="Аптечка",           kind="Resource", grant={Medkit=1}, cost={Scrap=70},                      phases=SHOP_ANY },
+	{ id="r_metal",   name="Металл x25",        kind="Resource", grant={Metal=25}, cost={Scrap=90},                      phases=SHOP_PREP },
+	{ id="r_plate",   name="Стальная панель",   kind="SpawnProp",prop="SteelPlate",cost={Metal=30},                      phases=SHOP_PREP },
+}
+
+-- Robux: только косметика и удобство, никакого P2W
+local PRODUCTS = {
+	-- [DeveloperProductId] = { kind="Coins", amount=500 }
+}
+local PASSES = {
+	-- [GamePassId] = { kind="Cosmetic", id="portal_neon" }
+}
+
+-- Патроны генерятся под конкретные стволы игрока
+local function ammoEntries(player: Player)
+	local out = {}
+	for slotName, id in WeaponManager.GetInventory(player) do
+		local def = Weapons.Get(id)
+		if def then
+			table.insert(out, {
+				id = "ammo_" .. id,
+				name = "Патроны: " .. def.Name .. " +" .. def.AmmoPack,
+				kind = "Ammo", weapon = id, amount = def.AmmoPack,
+				cost = def.AmmoCost, phases = SHOP_ANY, slot = slotName,
+			})
+		end
+	end
+	return out
+end
+
+local function findItem(player: Player, itemId: string)
+	for _, i in CATALOG do
+		if i.id == itemId then return i end
+	end
+	for _, i in ammoEntries(player) do
+		if i.id == itemId then return i end
+	end
+	return nil
+end
+
+local function phaseList(item)
+	local list = {}
+	for phase in item.phases do table.insert(list, phase) end
+	return list
+end
+
+local function display(player: Player)
+	local out = {}
+	local ownedSet = owned[player] or {}
+	local function add(item)
+		table.insert(out, {
+			id = item.id, name = item.name, kind = item.kind, cost = item.cost,
+			once = item.once, owned = ownedSet[item.id] == true, phases = phaseList(item),
+		})
+	end
+	for _, i in ammoEntries(player) do add(i) end
+	for _, i in CATALOG do add(i) end
+	return out
+end
+
+local function onPurchase(player: Player, itemId: any)
+	if not Sanity.str(itemId, 40) then return end
+	local char = player.Character
+	if not char or char:GetAttribute("Role") ~= "Survivor" or char:GetAttribute("Downed") then
+		Remotes.Notify:FireClient(player, "shopClosed")
+		return
+	end
+
+	local item = findItem(player, itemId)
+	if not item then
+		AntiCheat.Flag(player, "shop: неизвестный товар " .. tostring(itemId), 3)
+		return
+	end
+	if not item.phases[MatchState.Phase()] then
+		Remotes.Notify:FireClient(player, "shopClosed")
+		return
+	end
+
+	owned[player] = owned[player] or {}
+	if item.once and owned[player][item.id] then
+		Remotes.Notify:FireClient(player, "alreadyOwned")
+		return
+	end
+	if item.kind == "Upgrade" and WeaponManager.GetTier(player) >= item.tier then
+		Remotes.Notify:FireClient(player, "alreadyOwned")
+		return
+	end
+	-- патроны: сначала проверяем, есть ли куда лить. Ресурсы не сгорают впустую.
+	if item.kind == "Ammo" and WeaponManager.AmmoRoom(player, item.weapon) <= 0 then
+		Remotes.Notify:FireClient(player, "ammoFull")
+		return
+	end
+	if not EconomyManager.Spend(player, item.cost) then
+		Remotes.Notify:FireClient(player, "noResources")
+		return
+	end
+	owned[player][item.id] = true
+
+	if item.kind == "Weapon" then
+		WeaponManager.Give(player, item.weapon, WeaponManager.GetTier(player))
+	elseif item.kind == "Upgrade" then
+		WeaponManager.SetTier(player, item.tier)
+	elseif item.kind == "Ammo" then
+		WeaponManager.AddAmmo(player, item.amount, item.weapon)
+	elseif item.kind == "Resource" then
+		EconomyManager.Add(player, item.grant)
+	elseif item.kind == "SpawnProp" then
+		local BarricadeManager = require(script.Parent.BarricadeManager)
+		local templates = ServerStorage:FindFirstChild("PropTemplates")
+		local tpl = templates and templates:FindFirstChild(item.prop)
+		local root = AntiCheat.GetRoot(player)
+		if tpl and root then
+			local clone = tpl:Clone()
+			clone:SetAttribute("PropType", item.prop)
+			clone.Parent = workspace.BarricadeProps
+			if clone:IsA("Model") then
+				clone:PivotTo(root.CFrame * CFrame.new(0, 0, -5))
+			else
+				clone.CFrame = root.CFrame * CFrame.new(0, 0, -5)
+			end
+			BarricadeManager.RegisterProp(clone)
+		end
+	end
+
+	Remotes.Notify:FireClient(player, "purchased", item.id)
+	Remotes.ShopCatalogPush:FireClient(player, display(player))
+	Analytics.Custom(player, "shop_purchase", { item = item.id })
+end
+
+function ShopManager.ResetMatch()
+	table.clear(owned)
+end
+
+-- витрину надо обновлять при смене оружия: иначе патроны к новому стволу не появятся
+function ShopManager.Refresh(player: Player)
+	if player and player.Parent then
+		Remotes.ShopCatalogPush:FireClient(player, display(player))
+	end
+end
+
+function ShopManager.Init()
+	AntiCheat.Bind(Remotes.PurchaseRequest, "PurchaseRequest", onPurchase)
+	AntiCheat.BindFunction(Remotes.GetShopCatalog, "GetShopCatalog", function(p)
+		return display(p)
+	end)
+
+	Players.PlayerAdded:Connect(function(p)
+		task.delay(2, function()
+			if p.Parent then Remotes.ShopCatalogPush:FireClient(p, display(p)) end
+		end)
+	end)
+
+	-- Идемпотентная выдача: покупка не потеряется и не задублируется
+	MarketplaceService.ProcessReceipt = function(info)
+		local player = Players:GetPlayerByUserId(info.PlayerId)
+		if not player then return Enum.ProductPurchaseDecision.NotProcessedYet end
+		local profile = DataManager.Get(player)
+		if not profile then return Enum.ProductPurchaseDecision.NotProcessedYet end
+		if DataManager.HasReceipt(player, info.PurchaseId) then
+			return Enum.ProductPurchaseDecision.PurchaseGranted
+		end
+
+		local product = PRODUCTS[info.ProductId]
+		if not product then
+			warn("[Shop] неизвестный ProductId " .. tostring(info.ProductId))
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		local ok = pcall(function()
+			if product.kind == "Coins" then
+				DataManager.AddCoins(player, product.amount)
+			elseif product.kind == "Cosmetic" then
+				DataManager.Grant(player, product.id)
+			end
+			DataManager.MarkReceipt(player, info.PurchaseId)
+		end)
+		if not ok then return Enum.ProductPurchaseDecision.NotProcessedYet end
+
+		DataManager.Save(player, false)
+		Analytics.Economy(player, Enum.AnalyticsEconomyFlowType.Source, "Robux",
+			info.CurrencySpent, 0, "product_" .. info.ProductId)
+		return Enum.ProductPurchaseDecision.PurchaseGranted
+	end
+
+	Players.PlayerRemoving:Connect(function(p) owned[p] = nil end)
+end
+
+return ShopManager

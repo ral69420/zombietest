@@ -1,0 +1,945 @@
+--!nonstrict
+
+-- Перенос, призрак и установка. Клиент присылает только направление и поворот.
+
+-- Призрак считается ТОЙ ЖЕ функцией, что решает сервер: зелёное значит встанет.
+
+
+
+local Players = game:GetService("Players")
+
+local UserInputService = game:GetService("UserInputService")
+
+local RunService = game:GetService("RunService")
+
+local Workspace = game:GetService("Workspace")
+
+local CollectionService = game:GetService("CollectionService")
+
+
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+
+local Config = require(Shared.Config)
+
+local Remotes = require(Shared.Remotes)
+
+local Placement = require(Shared.PlacementRules)
+
+local ClientState = require(script.Parent.ClientState)
+
+
+
+local BarricadeController = {}
+
+local B = Config.BARRICADE
+
+local G = B.Ghost
+
+local H = Config.HAMMER
+
+
+
+local localPlayer = Players.LocalPlayer
+
+local camera = Workspace.CurrentCamera
+
+
+
+local carriedProp: Instance? = nil
+
+local ghost: Instance? = nil
+
+local ghostHighlight: Highlight? = nil
+
+local ghostLight: PointLight? = nil
+
+local carryHighlight: Highlight? = nil
+
+local ghostCF: CFrame? = nil
+
+local ghostShown = false
+
+local yaw = 0
+
+local lastSolve = 0
+
+local placeReason: string? = nil
+
+local placeValid = false
+
+local hammerTarget: Instance? = nil
+
+local dismantleHeld = false
+
+
+
+-- ── публичное состояние для HUD ───────────────────────────────────────
+
+function BarricadeController.GetHint(): (string, string?)
+
+	local char = localPlayer.Character
+
+	local role = char and char:GetAttribute("Role")
+
+	if role == "Zombie" then
+
+		return "ЛКМ бить · R способность", nil
+
+	end
+
+	if carriedProp then
+
+		return "ЛКМ поставить · R повернуть · E бросить", placeReason
+
+	end
+
+	if char and char:GetAttribute("HammerEquipped") then
+
+		return "ЛКМ починить · ПКМ (удержать) снять", nil
+
+	end
+
+	return "E взять предмет · 1 молоток · Q действие", nil
+
+end
+
+
+
+function BarricadeController.IsCarrying(): boolean
+
+	return carriedProp ~= nil
+
+end
+
+
+
+function BarricadeController.HammerTarget(): Instance?
+
+	return hammerTarget
+
+end
+
+
+
+-- ── вспомогательное ───────────────────────────────────────────────────
+
+local function myChar() return localPlayer.Character end
+
+
+
+local function headPart(): BasePart?
+
+	local char = myChar()
+
+	if not char then return nil end
+
+	local h = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+
+	return (h and h:IsA("BasePart")) and h or nil
+
+end
+
+
+
+local function aimDirection(): Vector3
+
+	local vp = camera.ViewportSize
+
+	local ray = camera:ViewportPointToRay(vp.X * 0.5, vp.Y * 0.5)
+
+	return ray.Direction.Unit
+
+end
+
+
+
+local function aimInstance(maxDist: number): Instance?
+
+	local rp = RaycastParams.new()
+
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+
+	rp.FilterDescendantsInstances = { myChar(), ghost }
+
+	local head = headPart()
+
+	if not head then return nil end
+
+	local res = Workspace:Raycast(head.Position, aimDirection() * maxDist, rp)
+
+	return res and res.Instance or nil
+
+end
+
+
+
+local function ancestorWithTag(inst: Instance?, tag: string): Instance?
+
+	local cur = inst
+
+	while cur and cur ~= Workspace do
+
+		if CollectionService:HasTag(cur, tag) then return cur end
+
+		cur = cur.Parent
+
+	end
+
+	return nil
+
+end
+
+
+
+local function nearestProp(maxDist: number, nailed: boolean?): Instance?
+
+	local char = myChar()
+
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+
+	if not root then return nil end
+
+	local best, bd = nil, maxDist
+
+	for _, prop in CollectionService:GetTagged("BarricadeProp") do
+
+		if prop == carriedProp then continue end
+
+		if nailed ~= nil and (prop:GetAttribute("IsNailed") == true) ~= nailed then continue end
+
+		local d = Placement.ReachDistance(root.Position, prop)
+
+		if d < bd then bd = d; best = prop end
+
+	end
+
+	return best
+
+end
+
+
+
+-- ── призрак ───────────────────────────────────────────────────────────
+
+local function paint(inst: Instance, color: Color3)
+
+	if ghostHighlight then
+
+		ghostHighlight.OutlineColor = color
+
+		ghostHighlight.FillColor = color
+
+	end
+
+	if ghostLight then ghostLight.Color = color end
+
+end
+
+
+
+local function destroyGhost()
+
+	if ghost then ghost:Destroy() end
+
+	ghost = nil
+
+	ghostHighlight = nil
+
+	ghostLight = nil
+
+	ghostCF = nil
+
+	ghostShown = false
+
+end
+
+
+
+local function buildGhost(prop: Instance)
+
+	destroyGhost()
+
+	local ok, clone = pcall(function() return prop:Clone() end)
+
+	if not ok or not clone then return end
+
+
+
+	for _, p in clone:GetDescendants() do
+
+		if p:IsA("BasePart") then
+
+			p.Anchored = true
+
+			p.CanCollide = false
+
+			p.CanQuery = false
+
+			p.CanTouch = false
+
+			p.CastShadow = false
+
+			p.Transparency = G.PreviewTransparency
+
+		elseif p:IsA("Decal") or p:IsA("Texture") then
+
+			p.Transparency = G.PreviewTransparency
+
+		elseif p:IsA("Script") or p:IsA("LocalScript") or p:IsA("Sound") then
+
+			p:Destroy()
+
+		end
+
+	end
+
+	if clone:IsA("BasePart") then
+
+		clone.Anchored = true
+
+		clone.CanCollide = false
+
+		clone.CanQuery = false
+
+		clone.Transparency = G.PreviewTransparency
+
+	end
+
+
+
+	local hl = Instance.new("Highlight")
+
+	hl.FillTransparency = G.FillTransparency
+
+	hl.OutlineTransparency = G.OutlineTransparency
+
+	hl.DepthMode = if G.AlwaysOnTop
+
+		then Enum.HighlightDepthMode.AlwaysOnTop
+
+		else Enum.HighlightDepthMode.Occluded
+
+	hl.Adornee = clone
+
+	hl.Parent = clone
+
+	ghostHighlight = hl
+
+
+
+	if G.Glow then
+
+		local base = if clone:IsA("Model") then (clone.PrimaryPart or clone:FindFirstChildWhichIsA("BasePart")) else clone
+
+		if base then
+
+			local light = Instance.new("PointLight")
+
+			light.Brightness = G.GlowBrightness
+
+			light.Range = G.GlowRange
+
+			light.Shadows = false
+
+			light.Parent = base
+
+			ghostLight = light
+
+		end
+
+	end
+
+
+
+	clone.Name = "BarricadeGhost"
+
+	clone.Parent = Workspace
+
+	ghost = clone
+
+	paint(clone, G.ValidColor)
+
+end
+
+
+
+local function showGhost(on: boolean)
+
+	if not ghost or ghostShown == on then return end
+
+	ghostShown = on
+
+	local t = if on then G.PreviewTransparency else 1
+
+	if ghost:IsA("BasePart") then ghost.Transparency = t end
+
+	for _, p in ghost:GetDescendants() do
+
+		if p:IsA("BasePart") then p.Transparency = t end
+
+	end
+
+	if ghostHighlight then
+
+		ghostHighlight.Enabled = on
+
+	end
+
+	if ghostLight then ghostLight.Enabled = on end
+
+end
+
+
+
+-- Проп В РУКАХ: полупрозрачный и с зелёным контуром. Видит только владелец.
+
+local function dressCarried(prop: Instance?)
+
+	if carryHighlight then carryHighlight:Destroy(); carryHighlight = nil end
+
+	if not prop then return end
+
+	for _, p in prop:GetDescendants() do
+
+		if p:IsA("BasePart") then p.LocalTransparencyModifier = G.CarryTransparency end
+
+	end
+
+	if prop:IsA("BasePart") then prop.LocalTransparencyModifier = G.CarryTransparency end
+
+
+
+	local hl = Instance.new("Highlight")
+
+	hl.FillTransparency = 1
+
+	hl.OutlineTransparency = G.OutlineTransparency
+
+	hl.OutlineColor = G.ValidColor
+
+	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+
+	hl.Adornee = prop
+
+	hl.Parent = prop
+
+	carryHighlight = hl
+
+end
+
+
+
+local function undressCarried(prop: Instance?)
+
+	if carryHighlight then carryHighlight:Destroy(); carryHighlight = nil end
+
+	if not prop then return end
+
+	for _, p in prop:GetDescendants() do
+
+		if p:IsA("BasePart") then p.LocalTransparencyModifier = 0 end
+
+	end
+
+	if prop:IsA("BasePart") then prop.LocalTransparencyModifier = 0 end
+
+end
+
+
+
+local function solveGhost()
+
+	if not ghost or not carriedProp then return end
+
+	local head = headPart()
+
+	if not head then return end
+
+
+
+	local cf, reason = Placement.Solve({
+
+		origin = head.Position,
+
+		dir = aimDirection(),
+
+		maxDist = B.MaxPlaceDistance,
+
+		size = Placement.SizeOf(carriedProp),
+
+		yaw = yaw,
+
+		ignore = { myChar(), carriedProp, ghost },
+
+	})
+
+
+
+	placeValid = cf ~= nil
+
+	placeReason = reason
+
+
+
+	if cf then
+
+		ghostCF = cf
+
+		paint(ghost, G.ValidColor)
+
+		showGhost(true)
+
+	else
+
+		paint(ghost, G.InvalidColor)
+
+		-- Красный призрак всё равно показываем: игрок видит, ЧТО не так.
+
+		local fallback = Placement.Solve({
+
+			origin = head.Position, dir = aimDirection(), maxDist = B.MaxPlaceDistance,
+
+			size = Placement.SizeOf(carriedProp), yaw = yaw,
+
+			ignore = { myChar(), carriedProp, ghost },
+
+		})
+
+		showGhost(ghostCF ~= nil or fallback ~= nil)
+
+	end
+
+end
+
+
+
+-- ── действия ──────────────────────────────────────────────────────────
+
+function BarricadeController.TryPickupOrDrop()
+
+	if ClientState.IsUILocked() then return end
+
+	if carriedProp then
+
+		Remotes.DropRequest:FireServer()
+
+		return
+
+	end
+
+	local aimed = ancestorWithTag(aimInstance(Config.MAX_INTERACT_DISTANCE), "BarricadeProp")
+
+	local prop = aimed or nearestProp(Config.AC.MaxInteractDistance, false)
+
+	if prop then Remotes.PickupRequest:FireServer(prop) end
+
+end
+
+
+
+function BarricadeController.TryPlace()
+
+	if ClientState.IsUILocked() then return end
+
+	if not carriedProp then return end
+
+	Remotes.PlaceFreeRequest:FireServer(aimDirection(), yaw)
+
+end
+
+
+
+function BarricadeController.Rotate(dir: number)
+
+	yaw = (yaw + math.rad(B.RotateStep) * dir) % (math.pi * 2)
+
+	lastSolve = 0
+
+end
+
+
+
+function BarricadeController.HammerHit()
+
+	if ClientState.IsUILocked() then return end
+
+	local prop = hammerTarget
+
+	if prop then Remotes.HammerRepairRequest:FireServer(prop) end
+
+end
+
+
+
+function BarricadeController.HammerDismantle(start: boolean)
+
+	if start then
+
+		local prop = hammerTarget
+
+		if not prop then return end
+
+		dismantleHeld = true
+
+		Remotes.HammerDismantleRequest:FireServer(prop, true)
+
+	elseif dismantleHeld then
+
+		dismantleHeld = false
+
+		Remotes.HammerDismantleRequest:FireServer(nil, false)
+
+	end
+
+end
+
+
+
+function BarricadeController.TryInteract()
+
+	if ClientState.IsUILocked() then return end
+
+	local target = aimInstance(Config.MAX_INTERACT_DISTANCE)
+
+	if target and target:IsA("BasePart") and target:GetAttribute("InteractType") then
+
+		Remotes.InteractRequest:FireServer(target)
+
+		return
+
+	end
+
+	local nodes = Workspace:FindFirstChild("ResourceNodes")
+
+	if target and nodes and target:IsDescendantOf(nodes) then
+
+		Remotes.GatherRequest:FireServer(target)
+
+		return
+
+	end
+
+	local char = myChar()
+
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+
+	if not root then return end
+
+	for _, p in Players:GetPlayers() do
+
+		if p == localPlayer then continue end
+
+		local c = p.Character
+
+		local r = c and c:FindFirstChild("HumanoidRootPart")
+
+		if r and c:GetAttribute("Downed")
+
+			and (r.Position - root.Position).Magnitude < Config.REVIVE_MAX_DIST then
+
+			Remotes.ReviveRequest:FireServer(p)
+
+			return
+
+		end
+
+	end
+
+end
+
+
+
+function BarricadeController.Attack()
+
+	if ClientState.IsUILocked() then return end
+
+	Remotes.ZombieAttackRequest:FireServer(aimInstance(Config.MAX_INTERACT_DISTANCE))
+
+end
+
+
+
+function BarricadeController.Ability()
+
+	if ClientState.IsUILocked() then return end
+
+	Remotes.AbilityRequest:FireServer(aimInstance(60))
+
+end
+
+
+
+-- ── жизненный цикл ────────────────────────────────────────────────────
+
+local function watchCarry(char: Model)
+
+	local ref = char:WaitForChild("CarriedProp", 10)
+
+	if not ref then return end
+
+	local function refresh()
+
+		local prop = ref.Value
+
+		if prop == carriedProp then return end
+
+		undressCarried(carriedProp)
+
+		carriedProp = prop
+
+		if prop then
+
+			yaw = 0
+
+			dressCarried(prop)
+
+			buildGhost(prop)
+
+			lastSolve = 0
+
+		else
+
+			destroyGhost()
+
+		end
+
+	end
+
+	ref.Changed:Connect(refresh)
+
+	refresh()
+
+end
+
+
+
+function BarricadeController.Init()
+
+	local function hookChar(char: Model)
+
+		carriedProp = nil
+
+		destroyGhost()
+
+		task.spawn(watchCarry, char)
+
+	end
+
+	if localPlayer.Character then hookChar(localPlayer.Character) end
+
+	localPlayer.CharacterAdded:Connect(hookChar)
+
+
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+
+		if processed or ClientState.IsUILocked() then return end
+
+		local char = myChar()
+
+		local role = char and char:GetAttribute("Role")
+
+		local hammer = char and char:GetAttribute("HammerEquipped")
+
+
+
+		if input.KeyCode == Enum.KeyCode.E then
+
+			if role == "Survivor" then BarricadeController.TryPickupOrDrop() end
+
+		elseif input.KeyCode == Enum.KeyCode.R then
+
+			if carriedProp then
+
+				BarricadeController.Rotate(1)
+
+			elseif role == "Zombie" then
+
+				BarricadeController.Ability()
+
+			end
+
+		elseif input.KeyCode == Enum.KeyCode.Q then
+
+			BarricadeController.TryInteract()
+
+		elseif input.KeyCode == Enum.KeyCode.H then
+
+			Remotes.UseMedkitRequest:FireServer()
+
+		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+			if role == "Zombie" then
+
+				BarricadeController.Attack()
+
+			elseif carriedProp then
+
+				BarricadeController.TryPlace()
+
+			elseif hammer then
+
+				BarricadeController.HammerHit()
+
+			end
+
+		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+
+			if hammer and not carriedProp then
+
+				BarricadeController.HammerDismantle(true)
+
+			end
+
+		end
+
+	end)
+
+
+
+	UserInputService.InputEnded:Connect(function(input)
+
+		if input.UserInputType == Enum.UserInputType.MouseButton2 then
+
+			BarricadeController.HammerDismantle(false)
+
+		end
+
+	end)
+
+
+
+	-- колесо крутит баррикаду: так понятнее, чем клавиша
+
+	UserInputService.InputChanged:Connect(function(input, processed)
+
+		if processed or not carriedProp then return end
+
+		if input.UserInputType == Enum.UserInputType.MouseWheel then
+
+			BarricadeController.Rotate(if input.Position.Z > 0 then 1 else -1)
+
+		end
+
+	end)
+
+
+
+	-- Решение о месте: 20 Гц. Кадры на это не тратим.
+
+	RunService.RenderStepped:Connect(function(dt)
+
+		local now = os.clock()
+
+		if carriedProp and ghost then
+
+			if now - lastSolve > 1 / math.max(G.SolveHz, 1) then
+
+				lastSolve = now
+
+				local ok, err = pcall(solveGhost)
+
+				if not ok then warn("[Barricade] ghost: " .. tostring(err)) end
+
+			end
+
+			if ghostCF then
+
+				local cur = if ghost:IsA("Model") then ghost:GetPivot() else ghost.CFrame
+
+				local target = ghostCF
+
+				if ghost:IsA("Model") then
+
+					local box = ghost:GetBoundingBox()
+
+					target = ghostCF * box:ToObjectSpace(ghost:GetPivot())
+
+				end
+
+				local a = math.min(dt * G.LerpSpeed, 1)
+
+				if ghost:IsA("Model") then
+
+					ghost:PivotTo(cur:Lerp(target, a))
+
+				else
+
+					ghost.CFrame = cur:Lerp(target, a)
+
+				end
+
+			end
+
+		end
+
+
+
+		-- цель молотка: только когда молоток в руках
+
+		local char = myChar()
+
+		if char and char:GetAttribute("HammerEquipped") and not carriedProp then
+
+			local aimed = ancestorWithTag(aimInstance(H.Reach), "BarricadeProp")
+
+			if aimed and aimed:GetAttribute("IsNailed") then
+
+				hammerTarget = aimed
+
+			else
+
+				hammerTarget = nearestProp(H.Reach, true)
+
+			end
+
+		else
+
+			hammerTarget = nil
+
+		end
+
+	end)
+
+
+
+	-- Сглаживание пропа в руках: сервер отстаёт на пинг.
+
+	RunService.RenderStepped:Connect(function(dt)
+
+		local prop = carriedProp
+
+		if not prop or not prop.Parent then return end
+
+		local char = myChar()
+
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+
+		if not root then return end
+
+		local look = root.CFrame.LookVector
+
+		local y = math.atan2(-look.X, -look.Z)
+
+		local goal = CFrame.new(root.Position) * CFrame.Angles(0, y, 0) * CFrame.new(B.CarryOffset)
+
+		local a = math.min(dt * 14, 1)
+
+		if prop:IsA("Model") and prop.PrimaryPart then
+
+			prop:PivotTo(prop:GetPivot():Lerp(goal, a))
+
+		elseif prop:IsA("BasePart") then
+
+			prop.CFrame = prop.CFrame:Lerp(goal, a)
+
+		end
+
+	end)
+
+end
+
+
+
+return BarricadeController

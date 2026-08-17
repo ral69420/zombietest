@@ -1,0 +1,153 @@
+--!nonstrict
+-- Секторы, переходы, аварийная кнопка, питание и портал.
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+local Sanity = require(Shared.Sanity)
+
+local AntiCheat = require(script.Parent.AntiCheat)
+local EconomyManager = require(script.Parent.EconomyManager)
+local ScoreManager = require(script.Parent.ScoreManager)
+local MatchState = require(script.Parent.MatchState)
+
+local SectorManager = {}
+local sectorsFolder: Folder?
+local escaped = {}
+local buttonCd = {}
+
+local function sectorModel(name: string)
+	return sectorsFolder and sectorsFolder:FindFirstChild(name)
+end
+
+local function setBarrier(sector: Instance?, open: boolean)
+	if not sector then return end
+	local barriers = sector:FindFirstChild("Barriers")
+	if not barriers then return end
+	for _, b in barriers:GetDescendants() do
+		if b:IsA("BasePart") then
+			b.CanCollide = not open
+			b.Transparency = if open then 1 else 0
+		end
+	end
+end
+
+function SectorManager.Activate(index: number)
+	local name = Config.SECTORS[index]
+	if not name then return end
+	for i, sec in Config.SECTORS do
+		setBarrier(sectorModel(sec), i <= index)   -- пройденные секторы открыты для отхода
+	end
+	MatchState.Set({ SectorIndex = index, SectorName = name,
+		Objective = "Держите сектор: " .. name })
+	Remotes.SectorChanged:FireAllClients(name, index)
+end
+
+function SectorManager.Collapse(index: number)
+	local sec = sectorModel(Config.SECTORS[index])
+	if not sec then return end
+	-- Переход с риском: гасим свет, роняем мост
+	local hazards = sec:FindFirstChild("Hazards")
+	if hazards then
+		for _, h in hazards:GetChildren() do
+			if h:IsA("BasePart") then
+				h.Anchored = false
+			elseif h:IsA("Light") then
+				h.Enabled = false
+			end
+		end
+	end
+	Remotes.Notify:FireAllClients("sectorCollapse", Config.SECTORS[index])
+end
+
+function SectorManager.EscapedList() return escaped end
+function SectorManager.ResetEscaped() table.clear(escaped) end
+
+-- Интерактивные объекты: панель питания, канистры, аварийная кнопка, портал
+local function onInteract(player: Player, target: any)
+	if not Sanity.inst(target, "BasePart") then return end
+	local char = player.Character
+	if not char or char:GetAttribute("Role") ~= "Survivor" or char:GetAttribute("Downed") then return end
+	local kind = target:GetAttribute("InteractType")
+	if not kind then
+		AntiCheat.Flag(player, "interact: не интерактив", 2); return
+	end
+	if not AntiCheat.InRange(player, target, Config.AC.MaxInteractDistance) then return end
+	if not AntiCheat.HasLineOfSight(player, target) then return end
+
+	if kind == "FuelCan" then
+		if target:GetAttribute("Taken") then return end
+		target:SetAttribute("Taken", true)
+		target.Transparency = 1
+		char:SetAttribute("CarryingFuel", true)
+		Remotes.Notify:FireClient(player, "fuelTaken")
+
+	elseif kind == "PowerPanel" then
+		if not char:GetAttribute("CarryingFuel") then
+			Remotes.Notify:FireClient(player, "needFuel"); return
+		end
+		char:SetAttribute("CarryingFuel", false)
+		EconomyManager.AddFuel(1)
+		ScoreManager.Award(player, "FuelDelivered")
+		local total = EconomyManager.GetFuel()
+		MatchState.Set({ FuelDelivered = total })
+		Remotes.Notify:FireAllClients("fuelDelivered", total)
+		if total >= Config.FUEL_REQUIRED and not MatchState.Get().PortalPowered then
+			MatchState.Set({ PortalPowered = true, Objective = "Питание есть! Держите площадку" })
+			ScoreManager.Award(player, "PowerRestored")
+			Remotes.Notify:FireAllClients("powerRestored")
+		end
+
+	elseif kind == "EmergencyButton" then
+		local now = os.clock()
+		if (buttonCd[target] or 0) + 8 > now then return end
+		buttonCd[target] = now
+		-- Закрывает одну дверь, открывает другую: выбор, а не халява
+		local closeDoor = target:GetAttribute("ClosesDoor")
+		local openDoor = target:GetAttribute("OpensDoor")
+		local doors = Workspace:FindFirstChild("Doors")
+		if doors then
+			local c = closeDoor and doors:FindFirstChild(closeDoor)
+			local o = openDoor and doors:FindFirstChild(openDoor)
+			if c then for _, p in c:GetDescendants() do
+					if p:IsA("BasePart") then p.CanCollide = true; p.Transparency = 0 end
+				end end
+			if o then for _, p in o:GetDescendants() do
+					if p:IsA("BasePart") then p.CanCollide = false; p.Transparency = 0.7 end
+				end end
+		end
+		Remotes.Notify:FireAllClients("emergencyButton", player.DisplayName)
+
+	elseif kind == "Portal" then
+		if MatchState.Phase() ~= "Evacuation" then return end
+		if not MatchState.Get().PortalPowered then
+			Remotes.Notify:FireClient(player, "portalUnpowered"); return
+		end
+		if table.find(escaped, player) then return end
+		table.insert(escaped, player)
+		ScoreManager.Award(player, "Escaped")
+		Remotes.Notify:FireAllClients("escaped", player.DisplayName)
+		local PlayerManager = require(script.Parent.PlayerManager)
+		if #PlayerManager.GetAllSurvivors() <= 1 then
+			ScoreManager.Award(player, "LastEscape")
+		end
+		-- Убираем со карты, но игрок остаётся смотреть финал
+		if char.PrimaryPart then
+			char:PivotTo(target.CFrame * CFrame.new(0, 500, 0))
+		end
+		local hum = char:FindFirstChildWhichIsA("Humanoid")
+		if hum then hum.WalkSpeed = 0; hum.JumpPower = 0 end
+		char:SetAttribute("Role", "Escaped")
+	end
+end
+
+function SectorManager.Init()
+	sectorsFolder = Workspace:FindFirstChild("Sectors")
+	if not sectorsFolder then
+		warn("[LastWave] Workspace.Sectors отсутствует - переходы между секторами не работают")
+	end
+	AntiCheat.Bind(Remotes.InteractRequest, "InteractRequest", onInteract)
+end
+
+return SectorManager

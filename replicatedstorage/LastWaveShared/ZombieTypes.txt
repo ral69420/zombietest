@@ -1,0 +1,45 @@
+--!strict
+export type ZombieClass = {
+	Name: string,
+	MaxHealth: number,
+	WalkSpeed: number,
+	Damage: number,
+	PropDamageMultiplier: number,
+	AttackCooldown: number,
+	AttackRange: number,
+	JumpPower: number,
+	Ability: string?,
+	AbilityCooldown: number,
+	PlayerOnly: boolean,     -- нельзя выдавать AI
+	UnlockWave: number,
+}
+
+local ZombieTypes: { [string]: ZombieClass } = {
+	Walker = {
+		Name="Walker", MaxHealth=120, WalkSpeed=14, Damage=20, PropDamageMultiplier=1.0,
+		AttackCooldown=0.8, AttackRange=5.5, JumpPower=40,
+		Ability=nil, AbilityCooldown=0, PlayerOnly=false, UnlockWave=1,
+	},
+	Runner = {
+		Name="Runner", MaxHealth=80, WalkSpeed=22, Damage=15, PropDamageMultiplier=0.7,
+		AttackCooldown=0.5, AttackRange=5.0, JumpPower=60,
+		Ability="Leap", AbilityCooldown=7, PlayerOnly=false, UnlockWave=1,
+	},
+	Brute = {
+		Name="Brute", MaxHealth=400, WalkSpeed=10, Damage=35, PropDamageMultiplier=3.5,
+		AttackCooldown=1.2, AttackRange=6.5, JumpPower=0,
+		Ability="Charge", AbilityCooldown=12, PlayerOnly=false, UnlockWave=2,
+	},
+	Spitter = {
+		Name="Spitter", MaxHealth=110, WalkSpeed=13, Damage=8, PropDamageMultiplier=0.4,
+		AttackCooldown=1.0, AttackRange=5.0, JumpPower=35,
+		Ability="Spit", AbilityCooldown=9, PlayerOnly=true, UnlockWave=2,
+	},
+	Mutant = {
+		Name="Mutant", MaxHealth=550, WalkSpeed=18, Damage=40, PropDamageMultiplier=2.5,
+		AttackCooldown=0.9, AttackRange=7.0, JumpPower=55,
+		Ability="Roar", AbilityCooldown=15, PlayerOnly=true, UnlockWave=4,
+	},
+}
+
+return ZombieTypes

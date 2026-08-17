@@ -1,0 +1,172 @@
+--!nonstrict
+local Players = game:GetService("Players")
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
+
+Players.CharacterAutoLoads = false -- спавном управляем только мы
+
+local S = script.Parent
+local Shared = game.ReplicatedStorage:WaitForChild("LastWaveShared")
+local Config = require(Shared:WaitForChild("Config"))
+local ZombieTypes = require(Shared:WaitForChild("ZombieTypes"))
+
+local PhysicsSetup   = require(S.PhysicsSetup)
+local PropClutter    = require(S.PropClutter)
+local RigScale       = require(S.RigScale)
+local AntiCheat      = require(S.AntiCheat)
+local MatchState     = require(S.MatchState)
+local DataManager    = require(S.DataManager)
+local Analytics      = require(S.AnalyticsManager)
+local EconomyManager = require(S.EconomyManager)
+local ScoreManager   = require(S.ScoreManager)
+local BarricadeMgr   = require(S.BarricadeManager)
+local ZombieRig      = require(S.ZombieRig)
+local WeaponManager  = require(S.WeaponManager)
+local PlayerManager  = require(S.PlayerManager)
+local CombatManager  = require(S.CombatManager)
+local ZombieManager  = require(S.ZombieManager)
+local SectorManager  = require(S.SectorManager)
+local ShopManager    = require(S.ShopManager)
+local GameManager    = require(S.GameManager)
+
+-- ═══ ПРЕДПОЛЁТНАЯ ПРОВЕРКА ════════════════════════════════════════════
+-- Один печатный отчёт вместо десяти часов "почему не работает".
+local function preflight()
+	local problems = 0
+	local function bad(msg: string)
+		problems += 1
+		warn("[LastWave/setup] " .. msg)
+	end
+
+	-- 1. Модели зомби
+	local rigsFolder = ZombieRig.Folder()
+	if not rigsFolder then
+		bad("ServerStorage.ZombieRigs отсутствует. Создай Folder с именем ровно 'ZombieRigs' и положи туда модели зомби. Пока будут серые заглушки.")
+	else
+		local found, missing = {}, {}
+		for className in ZombieTypes do
+			local tpl = ZombieRig.FindTemplate(className)
+			if tpl then
+				table.insert(found, className .. " -> " .. tpl.Name)
+			else
+				table.insert(missing, className)
+			end
+		end
+		if #found > 0 then
+			print("[LastWave/setup] модели зомби: " .. table.concat(found, ", "))
+		end
+		if #missing > 0 then
+			bad("нет моделей для: " .. table.concat(missing, ", ")
+				.. ". Переименуй модели или пропиши имена в Config.ZOMBIE_MODELS.")
+		end
+	end
+
+	if Config.ZOMBIE_PLAYER_MODELS then
+		print("[LastWave/setup] игрок-зомби использует твои модели (ZOMBIE_PLAYER_MODELS = true)")
+	else
+		print("[LastWave/setup] игрок-зомби использует свой аватар (ZOMBIE_PLAYER_MODELS = false)")
+	end
+
+	-- 2. Спавны
+	local spawnFolders = { "SurvivorSpawns", "ZombieSpawns", "LobbySpawns" }
+	for _, name in spawnFolders do
+		local folder = Workspace:FindFirstChild(name)
+		if not folder then
+			bad(("Workspace.%s отсутствует - будет использована резервная точка"):format(name))
+		else
+			local n = 0
+			for _, c in folder:GetDescendants() do
+				if c:IsA("BasePart") then n += 1 end
+			end
+			if n == 0 then
+				bad(("Workspace.%s пустая (нужны Part-маркеры)"):format(name))
+			else
+				print(("[LastWave/setup] %s: %d точек"):format(name, n))
+			end
+		end
+	end
+
+	-- 3. Сокеты больше не обязательны: ставим где угодно, лишь бы была опора
+	if Config.BARRICADE.UseSockets then
+		local sockets = Workspace:FindFirstChild("BarricadeSockets")
+		if not sockets then bad("UseSockets = true, но Workspace.BarricadeSockets нет") end
+	else
+		print("[LastWave/setup] свободная установка баррикад: сокеты не нужны")
+	end
+
+	-- 4. Пропы
+	local templates = ServerStorage:FindFirstChild("PropTemplates")
+	if not templates then
+		bad("ServerStorage.PropTemplates отсутствует - предметы для баррикад не появятся")
+	else
+		local noPrimary = {}
+		for _, tpl in templates:GetChildren() do
+			if tpl:IsA("Model") and not tpl.PrimaryPart then
+				table.insert(noPrimary, tpl.Name)
+			end
+		end
+		if #noPrimary > 0 then
+			bad("у этих моделей не задан PrimaryPart, они встанут в сокет криво: "
+				.. table.concat(noPrimary, ", "))
+		end
+	end
+
+	local propSpawns = Workspace:FindFirstChild("PropSpawns")
+	if not propSpawns then
+		bad("Workspace.PropSpawns отсутствует - предметы негде спавнить")
+	end
+
+	-- 5. Прочее
+	if not Workspace:FindFirstChild("Sectors") then
+		bad("Workspace.Sectors отсутствует - переходы между секторами не сработают")
+	end
+	if not Workspace:FindFirstChild("ResourceNodes") then
+		bad("Workspace.ResourceNodes отсутствует - собирать Scrap/Metal будет негде")
+	end
+
+	if problems == 0 then
+		print("[LastWave/setup] всё на месте, проблем не найдено")
+	else
+		warn(("[LastWave/setup] найдено проблем: %d. Смотри строки выше."):format(problems))
+	end
+end
+
+-- ═══ ЗАГРУЗКА ═════════════════════════════════════════════════════════
+print("[LastWave] boot…")
+
+local ORDER = {
+	{ "PhysicsSetup", PhysicsSetup },
+	{ "PropClutter", PropClutter },
+	{ "RigScale", RigScale },
+	{ "AntiCheat", AntiCheat },
+	{ "MatchState", MatchState },
+	{ "DataManager", DataManager },
+	{ "Analytics", Analytics },
+	{ "EconomyManager", EconomyManager },
+	{ "ScoreManager", ScoreManager },
+	{ "BarricadeMgr", BarricadeMgr },
+	{ "WeaponManager", WeaponManager },
+	{ "PlayerManager", PlayerManager },
+	{ "CombatManager", CombatManager },
+	{ "ZombieManager", ZombieManager },
+	{ "SectorManager", SectorManager },
+	{ "ShopManager", ShopManager },
+	{ "GameManager", GameManager },
+}
+
+-- Каждый модуль в pcall: падение одного больше не убивает весь сервер.
+for _, entry in ORDER do
+	local name, module = entry[1], entry[2]
+	if type(module.Init) ~= "function" then
+		warn(("[LastWave] у %s нет Init(), пропускаю"):format(name))
+		continue
+	end
+	local ok, err = pcall(module.Init)
+	if not ok then
+		warn(("[LastWave] %s.Init() УПАЛ: %s"):format(name, tostring(err)))
+	end
+end
+
+pcall(preflight)
+
+print("[LastWave] ready")

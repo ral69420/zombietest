@@ -1,0 +1,44 @@
+--!strict
+export type Kit = {
+	Name: string,
+	WalkSpeed: number,
+	SprintSpeed: number,
+	MaxHealth: number,
+	CarryBonus: number,
+	ReviveSpeedMultiplier: number,
+	RepairMultiplier: number,
+	StartWeapon: string,
+	StartResources: { [string]: number },
+	SeesBarricadeHP: boolean,
+	ZombieRadar: boolean,
+	ExtraPropLimit: number,
+}
+
+local Kits: { [string]: Kit } = {
+	Builder = {
+		Name = "Builder", WalkSpeed = 15, SprintSpeed = 21, MaxHealth = 100,
+		CarryBonus = 0.25, ReviveSpeedMultiplier = 1.0, RepairMultiplier = 1.5,
+		StartWeapon = "UMP45", StartResources = { Scrap = 30 },
+		SeesBarricadeHP = true, ZombieRadar = false, ExtraPropLimit = 2,
+	},
+	Medic = {
+		Name = "Medic", WalkSpeed = 16, SprintSpeed = 22, MaxHealth = 95,
+		CarryBonus = 0.0, ReviveSpeedMultiplier = 2.0, RepairMultiplier = 1.0,
+		StartWeapon = "Uzi", StartResources = { Medkit = 2 },
+		SeesBarricadeHP = false, ZombieRadar = false, ExtraPropLimit = 0,
+	},
+	Scout = {
+		Name = "Scout", WalkSpeed = 18, SprintSpeed = 26, MaxHealth = 85,
+		CarryBonus = -0.10, ReviveSpeedMultiplier = 1.0, RepairMultiplier = 0.8,
+		StartWeapon = "MP5", StartResources = {},
+		SeesBarricadeHP = false, ZombieRadar = true, ExtraPropLimit = 0,
+	},
+	Quartermaster = {
+		Name = "Quartermaster", WalkSpeed = 15, SprintSpeed = 20, MaxHealth = 105,
+		CarryBonus = 0.10, ReviveSpeedMultiplier = 1.0, RepairMultiplier = 1.0,
+		StartWeapon = "AK47", StartResources = { Scrap = 50, Metal = 20 },
+		SeesBarricadeHP = false, ZombieRadar = false, ExtraPropLimit = 1,
+	},
+}
+
+return Kits

@@ -1,0 +1,281 @@
+--!nonstrict
+
+-- Сборка ствола в руке. Анимируемые части (Upper/Magazine/Trigger/ReloadNob)
+
+-- сидят на Motor6D, поэтому клиент двигает их локально: визуал видят все, трафика ноль.
+
+local ServerStorage = game:GetService("ServerStorage")
+
+
+
+local Shared = game.ReplicatedStorage.LastWaveShared
+
+local Config = require(Shared.Config)
+
+local Weapons = require(Shared.WeaponTypes)
+
+
+
+local WeaponRig = {}
+
+
+
+local function fallbackModel(): Model
+
+	local m = Instance.new("Model")
+
+	local function box(name, size, color, cf)
+
+		local p = Instance.new("Part")
+
+		p.Name = name; p.Size = size; p.Color = color
+
+		p.Material = Enum.Material.Metal; p.CFrame = cf; p.Parent = m
+
+		return p
+
+	end
+
+	box("Root", Vector3.new(0.2, 0.2, 0.2), Color3.new(), CFrame.new(0, 0, 0)).Transparency = 1
+
+	box("Handle", Vector3.new(0.3, 0.8, 0.45), Color3.fromRGB(38, 38, 44), CFrame.new(0, -0.1, 0))
+
+	box("Upper", Vector3.new(0.3, 0.32, 2.2), Color3.fromRGB(60, 60, 68), CFrame.new(0, 0.4, -0.7))
+
+	box("Magazine", Vector3.new(0.26, 0.9, 0.4), Color3.fromRGB(30, 30, 36), CFrame.new(0, -0.35, -0.45))
+
+	box("Trigger", Vector3.new(0.1, 0.26, 0.12), Color3.fromRGB(20, 20, 24), CFrame.new(0, 0.05, -0.3))
+
+	box("ReloadNob", Vector3.new(0.16, 0.16, 0.3), Color3.fromRGB(95, 95, 105), CFrame.new(0.22, 0.55, -1.0))
+
+	m.PrimaryPart = m:FindFirstChild("Root")
+
+	return m
+
+end
+
+
+
+local function findPart(model: Model, name: string): BasePart?
+
+	local p = model:FindFirstChild(name, true)
+
+	return (p and p:IsA("BasePart")) and p or nil
+
+end
+
+
+
+function WeaponRig.Detach(char: Model?)
+
+	if not char then return end
+
+	local old = char:FindFirstChild("WeaponModel")
+
+	if old then old:Destroy() end
+
+	local g = char:FindFirstChild("WeaponGrip", true)
+
+	if g then g:Destroy() end
+
+	char:SetAttribute("WeaponId", nil)
+
+end
+
+
+
+function WeaponRig.Attach(player: Player, id: string): Model?
+
+	local char = player.Character
+
+	local def = Weapons.Get(id)
+
+	if not char or not def then return nil end
+
+	WeaponRig.Detach(char)
+
+
+
+	local arm = char:FindFirstChild("Right Arm") or char:FindFirstChild("RightHand")
+
+	if not arm or not arm:IsA("BasePart") then return nil end
+
+
+
+	local folder = ServerStorage:FindFirstChild("WeaponModels")
+
+	local tpl = folder and folder:FindFirstChild(def.Model)
+
+	local model: Model = if tpl then tpl:Clone() else fallbackModel()
+
+	model.Name = "WeaponModel"
+
+
+
+	-- 1. Root: невидимый якорь, к нему крепится рука и все части
+
+	local root = findPart(model, def.Parts.Root)
+
+	if not root then
+
+		root = Instance.new("Part")
+
+		root.Name = def.Parts.Root
+
+		root.Size = Vector3.new(0.2, 0.2, 0.2)
+
+		root.Transparency = 1
+
+		root.CFrame = if model.PrimaryPart then model.PrimaryPart.CFrame else model:GetPivot()
+
+		root.Parent = model
+
+	end
+
+	model.PrimaryPart = root
+
+
+
+	-- 2. Гигиена: без физики, коллизий, Touch и теней
+
+	for _, p in model:GetDescendants() do
+
+		if p:IsA("BasePart") then
+
+			p.Anchored = false
+
+			p.CanCollide = false
+
+			p.CanQuery = false
+
+			p.CanTouch = false
+
+			p.Massless = true
+
+			p.CastShadow = false
+
+			p.CollisionGroup = Config.GROUP_SURVIVOR
+
+		elseif p:IsA("JointInstance") and p.Name ~= "WeaponGrip" then
+
+			p:Destroy()
+
+		end
+
+	end
+
+
+
+	-- 3. Анимируемые части -> Motor6D. Остальное -> Weld.
+
+	local animated = {
+
+		Upper = def.Parts.Upper,
+
+		Magazine = def.Parts.Magazine,
+
+		Trigger = def.Parts.Trigger,
+
+		Nob = def.Parts.Nob,
+
+	}
+
+	local animatedSet = {}
+
+	for key, partName in animated do
+
+		local part = findPart(model, partName)
+
+		if not part or part == root then continue end
+
+		animatedSet[part] = true
+
+		local joint = Instance.new("Motor6D")
+
+		joint.Name = "J_" .. key
+
+		joint.Part0 = root
+
+		joint.Part1 = part
+
+		joint.C0 = root.CFrame:ToObjectSpace(part.CFrame)
+
+		joint:SetAttribute("BaseC0", joint.C0) -- базовая поза: клиент считает смещения от неё
+
+		joint.Parent = root
+
+	end
+
+
+
+	for _, p in model:GetDescendants() do
+
+		if p:IsA("BasePart") and p ~= root and not animatedSet[p] then
+
+			local w = Instance.new("WeldConstraint")
+
+			w.Part0, w.Part1 = root, p
+
+			w.Parent = root
+
+		end
+
+	end
+
+
+
+	-- 4. Дуло
+
+	local muzzle = model:FindFirstChild("Muzzle", true)
+
+	if not muzzle or not muzzle:IsA("Attachment") then
+
+		local upper = findPart(model, def.Parts.Upper) or root
+
+		local a = Instance.new("Attachment")
+
+		a.Name = "Muzzle"
+
+		a.Position = Vector3.new(0, 0, -upper.Size.Z * 0.5 - 0.1)
+
+		a.Parent = upper
+
+	end
+
+
+
+	model:SetAttribute("WeaponId", id)
+
+	model.Parent = char
+
+	root.CFrame = arm.CFrame * def.Grip
+
+
+
+	-- 5. Грип на Motor6D: клиент двигает C0 для отдачи
+
+	local gripJoint = Instance.new("Motor6D")
+
+	gripJoint.Name = "WeaponGrip"
+
+	gripJoint.Part0 = arm
+
+	gripJoint.Part1 = root
+
+	gripJoint.C0 = def.Grip
+
+	gripJoint:SetAttribute("BaseC0", def.Grip)
+
+	gripJoint.Parent = arm
+
+
+
+	char:SetAttribute("WeaponId", id)
+
+	return model
+
+end
+
+
+
+return WeaponRig

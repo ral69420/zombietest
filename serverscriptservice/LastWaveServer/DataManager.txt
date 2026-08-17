@@ -1,0 +1,154 @@
+--!nonstrict
+-- DataStore с session lock, ретраями, автосейвом и BindToClose.
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Config = require(game.ReplicatedStorage.LastWaveShared.Config)
+
+local DataManager = {}
+local store = DataStoreService:GetDataStore(Config.DATASTORE_NAME)
+local cache = {}        -- [player] = profile
+local canSave = {}      -- [player] = bool (false если сессия занята другим сервером)
+local sessionId = game.JobId .. "_" .. tostring(os.time())
+
+local function template()
+	return {
+		Version = 1,
+		Coins = 0, XP = 0, Level = 1,
+		Cosmetics = {},              -- [id] = true
+		Receipts = {},               -- [receiptId] = true (идемпотентность покупок)
+		Stats = { Matches=0, Escapes=0, Revives=0, ZombieKills=0, PropsPlaced=0, PropsBroken=0 },
+		_session = nil,
+	}
+end
+
+local function retry(fn, tries: number)
+	local lastErr
+	for i = 1, tries do
+		local ok, res = pcall(fn)
+		if ok then return true, res end
+		lastErr = res
+		task.wait(2 ^ i)   -- экспоненциальный backoff (ошибки 429 - норма)
+	end
+	return false, lastErr
+end
+
+function DataManager.Load(player: Player)
+	local key = "u_" .. player.UserId
+	local ok, profile = retry(function()
+		return store:UpdateAsync(key, function(old)
+			local data = old or template()
+			local s = data._session
+			-- session lock: чужая живая сессия = грузим read-only
+			if s and s.id ~= sessionId and (os.time() - (s.ts or 0)) < Config.SESSION_STALE then
+				return nil    -- отменяем запись
+			end
+			data._session = { id = sessionId, ts = os.time() }
+			return data
+		end)
+	end, 4)
+
+	if ok and profile then
+		cache[player] = profile
+		canSave[player] = true
+	else
+		warn(`[Data] {player.Name}: сессия занята или ошибка, режим без сохранения`)
+		local ok2, raw = retry(function() return store:GetAsync(key) end, 2)
+		cache[player] = (ok2 and raw) or template()
+		canSave[player] = false
+	end
+	return cache[player]
+end
+
+function DataManager.Get(player: Player)
+	return cache[player]
+end
+
+function DataManager.Save(player: Player, release: boolean?)
+	local profile = cache[player]
+	if not profile or not canSave[player] then return end
+	local key = "u_" .. player.UserId
+	retry(function()
+		return store:UpdateAsync(key, function(old)
+			-- не перетираем чужой лок
+			if old and old._session and old._session.id ~= sessionId
+				and (os.time() - (old._session.ts or 0)) < Config.SESSION_STALE then
+				return nil
+			end
+			local copy = table.clone(profile)
+			copy._session = if release then nil else { id = sessionId, ts = os.time() }
+			return copy
+		end)
+	end, 3)
+end
+
+function DataManager.AddCoins(player: Player, amount: number)
+	local p = cache[player]; if not p then return end
+	p.Coins = math.max(0, p.Coins + amount)
+end
+
+function DataManager.AddXP(player: Player, amount: number)
+	local p = cache[player]; if not p then return end
+	p.XP += amount
+	local need = 250 + p.Level * 150
+	while p.XP >= need do
+		p.XP -= need
+		p.Level += 1
+		need = 250 + p.Level * 150
+	end
+end
+
+function DataManager.Owns(player: Player, cosmeticId: string): boolean
+	local p = cache[player]
+	return p ~= nil and p.Cosmetics[cosmeticId] == true
+end
+
+function DataManager.Grant(player: Player, cosmeticId: string)
+	local p = cache[player]; if not p then return end
+	p.Cosmetics[cosmeticId] = true
+end
+
+function DataManager.HasReceipt(player: Player, receiptId: string): boolean
+	local p = cache[player]
+	return p ~= nil and p.Receipts[receiptId] == true
+end
+
+function DataManager.MarkReceipt(player: Player, receiptId: string)
+	local p = cache[player]; if not p then return end
+	p.Receipts[receiptId] = true
+end
+
+function DataManager.Stat(player: Player, key: string, delta: number)
+	local p = cache[player]; if not p or not p.Stats[key] then return end
+	p.Stats[key] += delta
+end
+
+function DataManager.Init()
+	Players.PlayerAdded:Connect(function(p) task.spawn(DataManager.Load, p) end)
+	for _, p in Players:GetPlayers() do task.spawn(DataManager.Load, p) end
+
+	Players.PlayerRemoving:Connect(function(p)
+		DataManager.Save(p, true)
+		cache[p] = nil; canSave[p] = nil
+	end)
+
+	task.spawn(function()
+		while true do
+			task.wait(Config.AUTOSAVE_INTERVAL)
+			for _, p in Players:GetPlayers() do
+				DataManager.Save(p, false)
+			end
+		end
+	end)
+
+	game:BindToClose(function()
+		if RunService:IsStudio() then return end
+		for _, p in Players:GetPlayers() do
+			task.spawn(DataManager.Save, p, true)
+		end
+		task.wait(4)
+	end)
+end
+
+return DataManager

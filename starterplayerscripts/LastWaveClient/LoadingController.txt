@@ -1,0 +1,102 @@
+--!nonstrict
+-- Быстрая прогрузка: свой экран, честный прогресс, ноль тяжёлой работы в первом кадре.
+local Players = game:GetService("Players")
+local ContentProvider = game:GetService("ContentProvider")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage:WaitForChild("LastWaveShared"):WaitForChild("Config"))
+local L = Config.LOADING
+
+local LoadingController = {}
+local localPlayer = Players.LocalPlayer
+
+function LoadingController.Init()
+	if not L.CustomScreen then return end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "LastWaveLoading"
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 999
+	gui.ResetOnSpawn = false
+	gui.Parent = localPlayer:WaitForChild("PlayerGui")
+
+	local bg = Instance.new("Frame")
+	bg.Size = UDim2.fromScale(1, 1)
+	bg.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+	bg.BorderSizePixel = 0
+	bg.Parent = gui
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, 0, 0, 46)
+	title.Position = UDim2.new(0, 0, 0.36, 0)
+	title.BackgroundTransparency = 1
+	title.Font = Enum.Font.GothamBlack
+	title.TextSize = 34
+	title.TextColor3 = Color3.fromRGB(235, 240, 255)
+	title.Text = "LAST WAVE"
+	title.Parent = bg
+
+	local tip = Instance.new("TextLabel")
+	tip.Size = UDim2.new(1, 0, 0, 22)
+	tip.Position = UDim2.new(0, 0, 0.44, 0)
+	tip.BackgroundTransparency = 1
+	tip.Font = Enum.Font.Gotham
+	tip.TextSize = 15
+	tip.TextColor3 = Color3.fromRGB(150, 155, 175)
+	tip.Text = L.Tips[math.random(1, #L.Tips)]
+	tip.Parent = bg
+
+	local back = Instance.new("Frame")
+	back.Size = UDim2.fromOffset(320, 6)
+	back.Position = UDim2.new(0.5, -160, 0.52, 0)
+	back.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+	back.BorderSizePixel = 0
+	back.Parent = bg
+	Instance.new("UICorner", back).CornerRadius = UDim.new(1, 0)
+
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.fromScale(0, 1)
+	fill.BackgroundColor3 = Color3.fromRGB(90, 255, 130)
+	fill.BorderSizePixel = 0
+	fill.Parent = back
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+	task.spawn(function()
+		local started = os.clock()
+		local steps = 4
+		local done = 0
+		local function step()
+			done += 1
+			fill.Size = UDim2.fromScale(done / steps, 1)
+		end
+
+		ReplicatedStorage:WaitForChild("LastWaveRemotes", 20); step()
+		if localPlayer.Character == nil then
+			localPlayer.CharacterAdded:Wait()
+		end
+		step()
+
+		-- Грузим только то, что реально нужно в первую секунду.
+		local assets = {}
+		if Config.MOUSE_ICON ~= "" then table.insert(assets, Config.MOUSE_ICON) end
+		table.insert(assets, "rbxassetid://4576475446")
+		pcall(function() ContentProvider:PreloadAsync(assets) end)
+		step()
+
+		local left = L.MinTime - (os.clock() - started)
+		if left > 0 then task.wait(left) end
+		step()
+
+		for i = 1, 12 do
+			bg.BackgroundTransparency = i / 12
+			title.TextTransparency = i / 12
+			tip.TextTransparency = i / 12
+			back.BackgroundTransparency = i / 12
+			fill.BackgroundTransparency = i / 12
+			task.wait(0.03)
+		end
+		gui:Destroy()
+	end)
+end
+
+return LoadingController

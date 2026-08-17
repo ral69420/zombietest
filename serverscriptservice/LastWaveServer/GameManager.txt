@@ -1,0 +1,479 @@
+--!nonstrict
+
+local Players = game:GetService("Players")
+
+local Shared = game.ReplicatedStorage:WaitForChild("LastWaveShared")
+local Config = require(Shared:WaitForChild("Config"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+local Kits = require(Shared:WaitForChild("SurvivorKits"))
+
+local AntiCheat = require(script.Parent:WaitForChild("AntiCheat"))
+local MatchState = require(script.Parent:WaitForChild("MatchState"))
+local PlayerManager = require(script.Parent:WaitForChild("PlayerManager"))
+local ZombieManager = require(script.Parent:WaitForChild("ZombieManager"))
+local BarricadeManager = require(script.Parent:WaitForChild("BarricadeManager"))
+local SectorManager = require(script.Parent:WaitForChild("SectorManager"))
+local EconomyManager = require(script.Parent:WaitForChild("EconomyManager"))
+local ScoreManager = require(script.Parent:WaitForChild("ScoreManager"))
+local ShopManager = require(script.Parent:WaitForChild("ShopManager"))
+local Analytics = require(script.Parent:WaitForChild("AnalyticsManager"))
+
+local GameManager = {}
+
+local matchRunning = false
+local loopStarted = false
+
+local function waitPhase(
+	seconds: number,
+	breakCheck: (() -> boolean)?
+): boolean
+	local remaining = seconds
+
+	while remaining > 0 do
+		task.wait(0.25)
+		remaining -= 0.25
+
+		if breakCheck and breakCheck() then
+			return false
+		end
+	end
+
+	return true
+end
+
+local function noSurvivorsLeft(): boolean
+	return #PlayerManager.GetAllSurvivors() <= 0
+end
+
+local function sectorForWave(wave: number): number
+	local total = 0
+
+	for index, amount in Config.WAVES_PER_SECTOR do
+		total += amount
+
+		if wave <= total then
+			return index
+		end
+	end
+
+	return #Config.SECTORS
+end
+
+local function sendKitOptions(player: Player)
+	local options = {}
+
+	for kitName in Kits do
+		table.insert(options, kitName)
+	end
+
+	Remotes.KitOptions:FireClient(
+		player,
+		"Survivor",
+		options
+	)
+end
+
+function GameManager.OnPlayerJoined(player: Player)
+	task.wait(0.5)
+
+	if not player.Parent then
+		return
+	end
+
+	-- Новый игрок всегда сначала появляется в лобби.
+	PlayerManager.SetTeam(player, "Lobby")
+	MatchState.PushTo(player)
+	sendKitOptions(player)
+
+	local phase = MatchState.Phase()
+
+	if not matchRunning
+		or phase == "Intermission"
+		or phase == "GameOver" then
+		Remotes.Notify:FireClient(
+			player,
+			"lobbyJoined"
+		)
+
+		return
+	end
+
+	-- Join-in-progress после начала матча.
+	local survivors = #PlayerManager.GetAllSurvivors()
+	local playerCount = #Players:GetPlayers()
+
+	local earlyEnough =
+		MatchState.Wave() <= Config.JOIN_AS_SURVIVOR_MAX_WAVE
+
+	local needSurvivors =
+		survivors < math.ceil(playerCount * 0.6)
+
+	if earlyEnough and needSurvivors then
+		PlayerManager.SetTeam(player, "Survivor")
+
+		Remotes.Notify:FireClient(
+			player,
+			"joinedAsSurvivor"
+		)
+	else
+		PlayerManager.SetTeam(player, "Zombie", "Walker")
+
+		Remotes.Notify:FireClient(
+			player,
+			"joinedAsZombie"
+		)
+	end
+end
+
+local function resetForNewMatch()
+	matchRunning = false
+
+	ZombieManager.ClearAllAI()
+	BarricadeManager.ResetMap()
+	EconomyManager.ResetAll()
+	ScoreManager.ResetMatch()
+	ShopManager.ResetMatch()
+	SectorManager.ResetEscaped()
+
+	for _, player in Players:GetPlayers() do
+		PlayerManager.SetTeam(player, "Lobby")
+	end
+end
+
+local function waitForLobbyCountdown(): boolean
+	local requiredPlayers = Config.MIN_PLAYERS
+	local countdown = Config.INTERMISSION_TIME
+	local elapsed = 0
+
+	MatchState.Set(
+		{
+			Phase = "Intermission",
+			Wave = 0,
+			SectorIndex = 0,
+			SectorName = "",
+			PortalPowered = false,
+			FuelDelivered = 0,
+			Objective = string.format(
+				"Лобби: %d/%d игроков",
+				#Players:GetPlayers(),
+				requiredPlayers
+			),
+		},
+		countdown
+	)
+
+	while elapsed < countdown do
+		if #Players:GetPlayers() < requiredPlayers then
+			elapsed = 0
+
+			MatchState.Set(
+				{
+					Phase = "Intermission",
+					Wave = 0,
+					Objective = string.format(
+						"Лобби: %d/%d игроков",
+						#Players:GetPlayers(),
+						requiredPlayers
+					),
+				},
+				countdown
+			)
+		else
+			elapsed += 0.25
+
+			MatchState.Set(
+				{
+					Objective = string.format(
+						"Матч начнётся через %d сек.",
+						math.max(0, math.ceil(countdown - elapsed))
+					),
+				}
+			)
+		end
+
+		task.wait(0.25)
+	end
+
+	return #Players:GetPlayers() >= requiredPlayers
+end
+
+local function assignStartingRoles()
+	local players = Players:GetPlayers()
+
+	for index = #players, 2, -1 do
+		local randomIndex = math.random(1, index)
+		players[index], players[randomIndex] =
+			players[randomIndex], players[index]
+	end
+
+	local zombieCount = 0
+
+	if #players > 1 then
+		zombieCount = math.max(
+			1,
+			math.floor(#players * Config.STARTING_ZOMBIE_RATIO)
+		)
+	end
+
+	for index, player in players do
+		if index <= zombieCount then
+			PlayerManager.SetTeam(
+				player,
+				"Zombie",
+				"Walker"
+			)
+
+			Analytics.Custom(
+				player,
+				"match_start",
+				{
+					role = "Zombie",
+				}
+			)
+		else
+			PlayerManager.SetTeam(
+				player,
+				"Survivor"
+			)
+
+			Analytics.Custom(
+				player,
+				"match_start",
+				{
+					role = "Survivor",
+				}
+			)
+		end
+	end
+end
+
+function GameManager.Loop()
+	while true do
+		resetForNewMatch()
+
+		local canStart = waitForLobbyCountdown()
+
+		if not canStart then
+			continue
+		end
+
+		matchRunning = true
+		assignStartingRoles()
+
+		SectorManager.Activate(1)
+
+		local currentSector = 1
+		local survivorsAlive = true
+
+		for wave = 1, Config.TOTAL_WAVES do
+			local requiredSector = sectorForWave(wave)
+
+			if requiredSector ~= currentSector then
+				MatchState.Set(
+					{
+						Phase = "Transition",
+						Wave = wave,
+						Objective = "Отходим! Заберите ресурсы",
+					},
+					Config.TRANSITION_TIME
+				)
+
+				SectorManager.Collapse(currentSector)
+				ZombieManager.StopWave()
+
+				local transitionFinished = waitPhase(
+					Config.TRANSITION_TIME,
+					noSurvivorsLeft
+				)
+
+				if not transitionFinished then
+					survivorsAlive = false
+					break
+				end
+
+				currentSector = requiredSector
+				SectorManager.Activate(currentSector)
+			end
+
+			MatchState.Set(
+				{
+					Phase = "Preparation",
+					Wave = wave,
+					Objective = string.format(
+						"Стройте оборону. Волна %d/%d",
+						wave,
+						Config.TOTAL_WAVES
+					),
+				},
+				Config.PREP_TIME
+			)
+
+			local preparationFinished = waitPhase(
+				Config.PREP_TIME,
+				noSurvivorsLeft
+			)
+
+			if not preparationFinished then
+				survivorsAlive = false
+				break
+			end
+
+			local waveDuration =
+				Config.WAVE_BASE_TIME
+				+ ((wave - 1) * Config.WAVE_TIME_INCREASE)
+
+			MatchState.Set(
+				{
+					Phase = "Wave",
+					Wave = wave,
+					Objective = string.format(
+						"Держитесь! Волна %d",
+						wave
+					),
+				},
+				waveDuration
+			)
+
+			ZombieManager.StartWave(wave)
+
+			local waveFinished = waitPhase(waveDuration, function()
+				if noSurvivorsLeft() then return true end
+				return Config.WAVE_ZOMBIES.EndWaveWhenCleared and ZombieManager.WaveCleared()
+			end)
+
+			ZombieManager.StopWave()
+
+			if noSurvivorsLeft() then
+				survivorsAlive = false
+				break
+			end
+
+			ScoreManager.AwardAllSurvivors("WaveSurvived")
+		end
+
+		local survivorsWon = false
+
+		if survivorsAlive and not noSurvivorsLeft() then
+			MatchState.Set(
+				{
+					Phase = "Evacuation",
+					Objective = string.format(
+						"Заправьте панель: 0/%d канистры",
+						Config.FUEL_REQUIRED
+					),
+				},
+				Config.EVAC_POWER_TIME
+			)
+
+			ZombieManager.StartWave(
+				Config.TOTAL_WAVES + 1
+			)
+
+			waitPhase(
+				Config.EVAC_POWER_TIME,
+				function()
+					return noSurvivorsLeft()
+						or MatchState.Get().PortalPowered
+				end
+			)
+
+			if MatchState.Get().PortalPowered
+				and not noSurvivorsLeft() then
+				MatchState.Set(
+					{
+						Objective = "Держите площадку!",
+					},
+					Config.EVAC_HOLD_TIME
+				)
+
+				waitPhase(
+					Config.EVAC_HOLD_TIME,
+					noSurvivorsLeft
+				)
+
+				MatchState.Set(
+					{
+						Objective = "Портал открыт! Бегите!",
+					},
+					Config.PORTAL_OPEN_TIME
+				)
+
+				waitPhase(
+					Config.PORTAL_OPEN_TIME,
+					function()
+						return noSurvivorsLeft()
+							or #SectorManager.EscapedList() == 0
+					end
+				)
+			end
+
+			ZombieManager.StopWave()
+			survivorsWon = #SectorManager.EscapedList() > 0
+		end
+
+		matchRunning = false
+
+		MatchState.Set(
+			{
+				Phase = "GameOver",
+				Objective = if survivorsWon
+					then "Выжившие эвакуировались!"
+					else "Колония пала!",
+			},
+			Config.GAMEOVER_TIME
+		)
+
+		ScoreManager.BroadcastSummary(
+			survivorsWon,
+			SectorManager.EscapedList()
+		)
+
+		ZombieManager.ClearAllAI()
+		waitPhase(Config.GAMEOVER_TIME)
+	end
+end
+
+function GameManager.Init()
+	if loopStarted then
+		return
+	end
+
+	loopStarted = true
+
+	AntiCheat.BindFunction(
+		Remotes.GetGameState,
+		"GetGameState",
+		function()
+			return MatchState.Get()
+		end
+	)
+
+	Players.PlayerAdded:Connect(function(player)
+		task.spawn(
+			GameManager.OnPlayerJoined,
+			player
+		)
+	end)
+
+	for _, player in Players:GetPlayers() do
+		task.spawn(
+			GameManager.OnPlayerJoined,
+			player
+		)
+	end
+
+	task.spawn(function()
+		local success, errorMessage = pcall(
+			GameManager.Loop
+		)
+
+		if not success then
+			warn(
+				"[LastWave] GameLoop error: "
+					.. tostring(errorMessage)
+			)
+		end
+	end)
+end
+
+return GameManager

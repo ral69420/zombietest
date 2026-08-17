@@ -1,0 +1,55 @@
+--!nonstrict
+local PhysicsService = game:GetService("PhysicsService")
+local Players = game:GetService("Players")
+local Config = require(game.ReplicatedStorage.LastWaveShared.Config)
+
+local PhysicsSetup = {}
+
+local GROUPS = {
+	Config.GROUP_PROP, Config.GROUP_CARRIED,
+	Config.GROUP_ZOMBIE, Config.GROUP_SURVIVOR, Config.GROUP_DEBRIS,
+}
+
+function PhysicsSetup.Init()
+	for _, g in GROUPS do
+		if not PhysicsService:IsCollisionGroupRegistered(g) then
+			PhysicsService:RegisterCollisionGroup(g)
+		end
+	end
+	-- Зомби не блокируют друг друга телами (док: "не блокировать проходы телами")
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_ZOMBIE, Config.GROUP_ZOMBIE, false)
+	-- Несомый проп не толкает никого: убирает фling полностью
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_ZOMBIE, false)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_SURVIVOR, false)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_PROP, false)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_CARRIED, false)
+	-- Установленная баррикада блокирует всех
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_PROP, Config.GROUP_ZOMBIE, true)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_PROP, Config.GROUP_SURVIVOR, true)
+
+	local collide = Config.CLUTTER.CollideWithPlayers
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_CARRIED, false)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_SURVIVOR, collide)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_ZOMBIE, collide)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_DEBRIS, true)
+end
+
+function PhysicsSetup.ApplyToCharacter(char: Model, role: string)
+	local group = if role == "Zombie" then Config.GROUP_ZOMBIE else Config.GROUP_SURVIVOR
+	for _, p in char:GetDescendants() do
+		if p:IsA("BasePart") then p.CollisionGroup = group end
+	end
+	char.DescendantAdded:Connect(function(d)
+		if d:IsA("BasePart") then d.CollisionGroup = group end
+	end)
+end
+
+function PhysicsSetup.SetPropGroup(prop: Instance, carried: boolean)
+	local g = if carried then Config.GROUP_CARRIED else Config.GROUP_PROP
+	if prop:IsA("BasePart") then prop.CollisionGroup = g end
+	for _, p in prop:GetDescendants() do
+		if p:IsA("BasePart") then p.CollisionGroup = g end
+	end
+end
+
+return PhysicsSetup

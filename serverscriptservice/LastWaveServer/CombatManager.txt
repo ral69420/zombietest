@@ -1,0 +1,132 @@
+--!nonstrict
+-- Атаки зомби и способности. LOS обязателен: удары сквозь стену больше не проходят.
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Shared = game.ReplicatedStorage.LastWaveShared
+local Config = require(Shared.Config)
+local Remotes = require(Shared.Remotes)
+local Sanity = require(Shared.Sanity)
+local ZombieTypes = require(Shared.ZombieTypes)
+
+local AntiCheat = require(script.Parent.AntiCheat)
+local BarricadeManager = require(script.Parent.BarricadeManager)
+local PlayerManager = require(script.Parent.PlayerManager)
+local ScoreManager = require(script.Parent.ScoreManager)
+
+local CombatManager = {}
+local lastAttack = {}
+local lastAbility = {}
+
+local function zombieContext(player: Player)
+	local char = player.Character
+	if not char or char:GetAttribute("Role") ~= "Zombie" then return nil end
+	local hum = char:FindFirstChildWhichIsA("Humanoid")
+	if not hum or hum.Health <= 0 then return nil end     -- мёртвый не бьёт
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+	local z = ZombieTypes[tostring(char:GetAttribute("ZombieType") or "Walker")] or ZombieTypes.Walker
+	return char, root, z
+end
+
+local function onAttack(player: Player, target: any)
+	if not Sanity.inst(target, "Instance") then return end
+	local char, root, z = zombieContext(player)
+	if not char then return end
+
+	local now = os.clock()
+	if now - (lastAttack[player] or 0) < z.AttackCooldown - Config.AC.CooldownSlack then return end
+
+	local range = z.AttackRange + Config.AC.MaxAttackSlack
+
+	-- Цель 1: выживший
+	local model = target:FindFirstAncestorWhichIsA("Model") or target
+	if model:GetAttribute("Role") == "Survivor" then
+		local tRoot = model:FindFirstChild("HumanoidRootPart")
+		if not tRoot then return end
+		if (tRoot.Position - root.Position).Magnitude > range then
+			AntiCheat.Flag(player, "attack range", 1); return
+		end
+		if not AntiCheat.HasLineOfSight(player, tRoot, { model }) then return end
+		lastAttack[player] = now
+		PlayerManager.ApplyDamage(model, z.Damage, player)
+		Remotes.HitFx:FireAllClients(player, root.Position, { tRoot.Position }, "Claw")
+		return
+	end
+
+	-- Цель 2: установленная баррикада
+	local prop = BarricadeManager.ResolveProp(target)
+	if prop and BarricadeManager.IsNailedProp(prop) then
+		local part = if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart")
+		if not part then return end
+		if (part.Position - root.Position).Magnitude > range then return end
+		if not AntiCheat.HasLineOfSight(player, part, { prop }) then return end
+		lastAttack[player] = now
+		BarricadeManager.DamageProp(prop, z.Damage * z.PropDamageMultiplier, player)
+		Remotes.HitFx:FireAllClients(player, root.Position, { part.Position }, "Claw")
+		return
+	end
+
+	AntiCheat.Flag(player, "attack: невалидная цель " .. target.Name, 2)
+end
+
+local function onAbility(player: Player, arg: any)
+	local char, root, z = zombieContext(player)
+	if not char or not z.Ability then return end
+
+	local now = os.clock()
+	if now - (lastAbility[player] or 0) < z.AbilityCooldown then return end
+	lastAbility[player] = now
+	char:SetAttribute("AbilityReady", false)
+	task.delay(z.AbilityCooldown, function()
+		if char.Parent then char:SetAttribute("AbilityReady", true) end
+	end)
+
+	if z.Ability == "Leap" then
+		local dir = root.CFrame.LookVector
+		root.AssemblyLinearVelocity = dir * 70 + Vector3.new(0, 45, 0)
+		Remotes.AbilityFx:FireAllClients("Leap", root.Position)
+
+	elseif z.Ability == "Charge" then
+		local hum = char:FindFirstChildWhichIsA("Humanoid")
+		root.AssemblyLinearVelocity = root.CFrame.LookVector * 85
+		Remotes.AbilityFx:FireAllClients("Charge", root.Position)
+
+	elseif z.Ability == "Spit" then
+		if not Sanity.inst(arg, "Instance") then return end
+		local prop = BarricadeManager.ResolveProp(arg)
+		if not prop or not BarricadeManager.IsNailedProp(prop) then return end
+		local part = if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart")
+		if not part or (part.Position - root.Position).Magnitude > 45 then return end
+		if not AntiCheat.HasLineOfSight(player, part, { prop }) then return end
+		BarricadeManager.InfectProp(prop, Config.SPIT_INFECT_TIME)
+		Remotes.AbilityFx:FireAllClients("Spit", part.Position)
+
+	elseif z.Ability == "Roar" then
+		-- Баф всем зомби рядом: зрелищно, но без вечного преимущества
+		for _, p in PlayerManager.GetAllZombies() do
+			local c = p.Character
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			if r and (r.Position - root.Position).Magnitude < 60 then
+				local hum = c:FindFirstChildWhichIsA("Humanoid")
+				if hum then
+					local base = hum.WalkSpeed
+					c:SetAttribute("Enraged", true)
+					task.delay(6, function()
+						if c.Parent then c:SetAttribute("Enraged", false) end
+					end)
+				end
+			end
+		end
+		Remotes.AbilityFx:FireAllClients("Roar", root.Position)
+	end
+end
+
+function CombatManager.Init()
+	AntiCheat.Bind(Remotes.ZombieAttackRequest, "ZombieAttackRequest", onAttack)
+	AntiCheat.Bind(Remotes.AbilityRequest, "AbilityRequest", onAbility)
+	Players.PlayerRemoving:Connect(function(p)
+		lastAttack[p] = nil; lastAbility[p] = nil
+	end)
+end
+
+return CombatManager

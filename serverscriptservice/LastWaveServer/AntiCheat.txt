@@ -1,0 +1,434 @@
+--!nonstrict
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared = ReplicatedStorage:WaitForChild("LastWaveShared")
+local Config = require(Shared:WaitForChild("Config"))
+
+local AntiCheat = {}
+
+local buckets = {}
+local flags = {}
+local lastPositions = {}
+local spawnGraceUntil = {}
+
+local function markSpawnGrace(player: Player)
+	spawnGraceUntil[player] = os.clock() + 5
+	lastPositions[player] = nil
+end
+
+function AntiCheat.CheckRate(
+	player: Player,
+	key: string
+): boolean
+	local limit = Config.RATE_LIMITS[key]
+
+	if not limit then
+		return true
+	end
+
+	local burst = limit[1]
+	local refill = limit[2]
+
+	buckets[player] = buckets[player] or {}
+
+	local bucket = buckets[player][key]
+	local now = os.clock()
+
+	if not bucket then
+		bucket = {
+			tokens = burst,
+			last = now,
+		}
+
+		buckets[player][key] = bucket
+	end
+
+	local elapsed = now - bucket.last
+
+	bucket.tokens = math.min(
+		burst,
+		bucket.tokens + elapsed * refill
+	)
+
+	bucket.last = now
+
+	-- Важно: обычный спам теперь только блокируется.
+	-- Флаг античита за это не добавляется.
+	if bucket.tokens < 1 then
+		return false
+	end
+
+	bucket.tokens -= 1
+	return true
+end
+
+function AntiCheat.Flag(
+	player: Player,
+	reason: string,
+	severity: number
+)
+	flags[player] = (flags[player] or 0) + severity
+
+	warn(string.format(
+		"[AC] %s | %s (+%d = %d)",
+		player.Name,
+		reason,
+		severity,
+		flags[player]
+		))
+
+	if flags[player] >= Config.AC.FlagKickThreshold then
+		player:Kick(
+			"Обнаружена модификация клиента. Перезайди в игру."
+		)
+	end
+end
+
+function AntiCheat.GetFlags(player: Player): number
+	return flags[player] or 0
+end
+
+function AntiCheat.GetRoot(
+	player: Player
+): BasePart?
+	local character = player.Character
+
+	if not character then
+		return nil
+	end
+
+	local humanoid =
+		character:FindFirstChildWhichIsA("Humanoid")
+
+	if not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+
+	local root =
+		character:FindFirstChild("HumanoidRootPart")
+
+	if root and root:IsA("BasePart") then
+		return root
+	end
+
+	return nil
+end
+
+function AntiCheat.InRange(
+	player: Player,
+	target: BasePart,
+	maxDistance: number
+): boolean
+	local root = AntiCheat.GetRoot(player)
+
+	if not root then
+		return false
+	end
+
+	local distance =
+		(root.Position - target.Position).Magnitude
+
+	-- Неверная дистанция просто отклоняется.
+	-- За обычный промах флаг не начисляется.
+	if distance > maxDistance then
+		return false
+	end
+
+	return true
+end
+
+function AntiCheat.HasLineOfSight(
+	player: Player,
+	target: BasePart,
+	ignore: { Instance }?
+): boolean
+	local character = player.Character
+	local root = AntiCheat.GetRoot(player)
+
+	if not character or not root then
+		return false
+	end
+
+	local filter = {
+		character,
+		target,
+	}
+
+	if target.Parent then
+		table.insert(filter, target.Parent)
+	end
+
+	if ignore then
+		for _, instance in ignore do
+			table.insert(filter, instance)
+		end
+	end
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType =
+		Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = filter
+	raycastParams.RespectCanCollide = true
+
+	local origin =
+		root.Position + Vector3.new(0, 1.5, 0)
+
+	local direction = target.Position - origin
+
+	local result = Workspace:Raycast(
+		origin,
+		direction,
+		raycastParams
+	)
+
+	-- Стена блокирует действие, но это не считается читом.
+	if result
+		and result.Instance
+		and result.Instance.CanCollide then
+		return false
+	end
+
+	return true
+end
+
+function AntiCheat.ValidateAndAim(
+	player: Player,
+	direction: Vector3,
+	maxDistance: number
+)
+	if typeof(direction) ~= "Vector3" then
+		return nil
+	end
+
+	if direction.Magnitude < 0.9
+		or direction.Magnitude > 1.1 then
+		return nil
+	end
+
+	local character = player.Character
+
+	if not character then
+		return nil
+	end
+
+	local head =
+		character:FindFirstChild("Head")
+		or character:FindFirstChild("HumanoidRootPart")
+
+	if not head or not head:IsA("BasePart") then
+		return nil
+	end
+
+	return head.Position, direction.Unit * maxDistance
+end
+
+local function getAllowedSpeed(
+	character: Model
+): number
+	local humanoid =
+		character:FindFirstChildWhichIsA("Humanoid")
+
+	if not humanoid then
+		return 0
+	end
+
+	return math.max(humanoid.WalkSpeed, 8)
+end
+
+local function watchdogStep()
+	for _, player in Players:GetPlayers() do
+		if spawnGraceUntil[player]
+			and os.clock() < spawnGraceUntil[player] then
+			lastPositions[player] = nil
+			continue
+		end
+
+		local character = player.Character
+		local root =
+			character
+			and character:FindFirstChild("HumanoidRootPart")
+
+		local humanoid =
+			character
+			and character:FindFirstChildWhichIsA("Humanoid")
+
+		if not root
+			or not root:IsA("BasePart")
+			or not humanoid
+			or humanoid.Health <= 0 then
+			lastPositions[player] = nil
+			continue
+		end
+
+		local now = os.clock()
+		local record = lastPositions[player]
+
+		if not record then
+			lastPositions[player] = {
+				position = root.Position,
+				time = now,
+				airTime = 0,
+			}
+
+			continue
+		end
+
+		local deltaTime = math.max(
+			now - record.time,
+			0.05
+		)
+
+		local delta = root.Position - record.position
+
+		local horizontalDistance = (
+			delta * Vector3.new(1, 0, 1)
+		).Magnitude
+
+		if horizontalDistance > Config.AC.TeleportStuds then
+			root.CFrame = CFrame.new(record.position)
+			root.AssemblyLinearVelocity = Vector3.zero
+
+			AntiCheat.Flag(
+				player,
+				"teleport " .. math.floor(horizontalDistance),
+				4
+			)
+		else
+			local allowedDistance =
+				getAllowedSpeed(character)
+				* deltaTime
+				* Config.AC.SpeedTolerance
+				+ Config.AC.SpeedGraceStuds
+
+			if horizontalDistance > allowedDistance then
+				root.CFrame = CFrame.new(record.position)
+				root.AssemblyLinearVelocity = Vector3.zero
+
+				-- Скоростной промах больше не добавляет флаг.
+				-- Это защищает от лагов и серверного rubber-band.
+			end
+		end
+
+		local humanoidState = humanoid:GetState()
+
+		if humanoidState == Enum.HumanoidStateType.Freefall
+			or humanoidState == Enum.HumanoidStateType.Flying then
+			record.airTime += deltaTime
+
+			if record.airTime > Config.AC.MaxAirborneTime then
+				record.airTime = 0
+				humanoid:ChangeState(
+					Enum.HumanoidStateType.GettingUp
+				)
+			end
+		else
+			record.airTime = 0
+		end
+
+		record.position = root.Position
+		record.time = now
+	end
+end
+
+function AntiCheat.Init()
+	Players.PlayerAdded:Connect(function(player)
+		markSpawnGrace(player)
+
+		player.CharacterAdded:Connect(function()
+			markSpawnGrace(player)
+		end)
+	end)
+
+	for _, player in Players:GetPlayers() do
+		markSpawnGrace(player)
+
+		player.CharacterAdded:Connect(function()
+			markSpawnGrace(player)
+		end)
+	end
+
+	task.spawn(function()
+		while true do
+			task.wait(Config.AC.CheckInterval)
+
+			local success, errorMessage = pcall(
+				watchdogStep
+			)
+
+			if not success then
+				warn(
+					"[AC] watchdog error: "
+						.. tostring(errorMessage)
+				)
+			end
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		buckets[player] = nil
+		flags[player] = nil
+		lastPositions[player] = nil
+		spawnGraceUntil[player] = nil
+	end)
+end
+
+function AntiCheat.Bind(
+	remote: RemoteEvent,
+	key: string,
+	handler: (Player, ...any) -> ()
+)
+	remote.OnServerEvent:Connect(function(player, ...)
+		if not AntiCheat.CheckRate(player, key) then
+			return
+		end
+
+		local success, errorMessage = pcall(
+			handler,
+			player,
+			...
+		)
+
+		if not success then
+			warn(string.format(
+				"[LastWave] %s error: %s",
+				key,
+				tostring(errorMessage)
+				))
+		end
+	end)
+end
+
+function AntiCheat.BindFunction(
+	remote: RemoteFunction,
+	key: string,
+	handler: (Player, ...any) -> any
+)
+	remote.OnServerInvoke = function(player, ...)
+		if not AntiCheat.CheckRate(player, key) then
+			return nil
+		end
+
+		local success, result = pcall(
+			handler,
+			player,
+			...
+		)
+
+		if not success then
+			warn(string.format(
+				"[LastWave] %s error: %s",
+				key,
+				tostring(result)
+				))
+
+			return nil
+		end
+
+		return result
+	end
+end
+
+return AntiCheat
