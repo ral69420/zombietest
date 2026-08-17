@@ -23,14 +23,14 @@ local reason
 local yaw = 0
 local height = 0
 local lastSolve = 0
-local dismantleHeld = false
+local currentTargetCF: CFrame? = nil
 
 -- Фриз-режим (Lock / Freeze)
 local isFrozen = false
 local frozenCF: CFrame? = nil
 local frozenAim: Vector3? = nil
 local freezeOriginPos: Vector3? = nil
-local FREEZE_MAX_DIST = 16 -- ~4.5м (16 studs)
+local FREEZE_MAX_DIST = 16
 
 local ROT_STEP = 15
 local HEIGHT_SPEED = 2
@@ -129,10 +129,14 @@ function M.GetHint()
 		if isFrozen then
 			return "🔒 [SHIFT] ЗАФИКСИРОВАНО · ЛКМ/Y поставить · R вращать · SHIFT снять", reason
 		else
-			return "ЛКМ / Y поставить · [SHIFT] зафиксировать · R поворот · Колёсико высота · E бросить", reason
+			return "ЛКМ / Y поставить · [SHIFT] зафиксировать · R поворот · E бросить", reason
 		end
 	end
-	if hammerEquipped() then return "ЛКМ чинить · ПКМ удерживать для снятия", nil end
+	if hammerEquipped() then return "ЛКМ чинить · ПКМ снять шуруп", nil end
+	local target = hammerTarget
+	if target and target:GetAttribute("IsNailed") == true then
+		return "ПКМ снять шуруп (демонтаж) · E взять", nil
+	end
 	return "E взять предмет · [3] молоток для ремонта", nil
 end
 
@@ -153,6 +157,7 @@ function M.ToggleFreeze()
 			frozenCF = solved
 			frozenAim = aim()
 			freezeOriginPos = r.Position
+			currentTargetCF = solved
 		end
 	else
 		isFrozen = false
@@ -212,13 +217,13 @@ function M.HammerHit()
 end
 
 function M.HammerDismantle(start)
-	if not hammerEquipped() then return end
-	if start and hammerTarget then
-		dismantleHeld = true
-		Remotes.HammerDismantleRequest:FireServer(hammerTarget, true)
-	elseif not start and dismantleHeld then
-		dismantleHeld = false
+	if not start then
 		Remotes.HammerDismantleRequest:FireServer(nil, false)
+		return
+	end
+	local target = hammerTarget or tagged(ray(H.Reach), "BarricadeProp") or nearest(H.Reach, true)
+	if target then
+		Remotes.HammerDismantleRequest:FireServer(target, true)
 	end
 end
 
@@ -257,8 +262,10 @@ local function onCarriedChanged(p)
 	frozenCF = nil
 	frozenAim = nil
 	freezeOriginPos = nil
+	currentTargetCF = nil
 	if p then
 		setHighlight(p, true)
+		currentTargetCF = solve()
 	end
 end
 
@@ -280,6 +287,7 @@ function M.Init()
 		height = 0
 		isFrozen = false
 		frozenCF = nil
+		currentTargetCF = nil
 		setHighlight(nil, false)
 		task.spawn(watch, c)
 	end)
@@ -318,7 +326,7 @@ function M.Init()
 			elseif hammerEquipped() then
 				M.HammerHit()
 			end
-		elseif i.UserInputType == Enum.UserInputType.MouseButton2 and hammerEquipped() and not carried then
+		elseif i.UserInputType == Enum.UserInputType.MouseButton2 and not carried then
 			M.HammerDismantle(true)
 		end
 	end)
@@ -351,33 +359,31 @@ function M.Init()
 
 		if carried then
 			local now = os.clock()
-			local targetCF: CFrame? = nil
-
 			if isFrozen and frozenCF then
-				targetCF = frozenCF
+				currentTargetCF = frozenCF
 			else
-				if now - lastSolve > 1 / math.max(G.SolveHz, 1) then
+				if now - lastSolve > 0.033 then
 					lastSolve = now
-					targetCF = solve()
+					local solved = solve()
+					if solved then
+						currentTargetCF = solved
+					end
 				end
 			end
 
-			if targetCF then
-				local a = math.min(dt * G.LerpSpeed, 1)
+			if currentTargetCF then
+				local lerpRate = math.clamp(dt * 20, 0, 1)
 				if carried:IsA("Model") then
 					local cur = carried:GetPivot()
-					carried:PivotTo(cur:Lerp(targetCF, a))
+					carried:PivotTo(cur:Lerp(currentTargetCF, lerpRate))
 				elseif carried:IsA("BasePart") then
-					carried.CFrame = carried.CFrame:Lerp(targetCF, a)
+					carried.CFrame = carried.CFrame:Lerp(currentTargetCF, lerpRate)
 				end
 			end
 		end
 
-		if hammerEquipped() and not carried then
-			hammerTarget = tagged(ray(H.Reach), "BarricadeProp") or nearest(H.Reach, true)
-		else
-			hammerTarget = nil
-		end
+		local reachDist = H.Reach or 14
+		hammerTarget = tagged(ray(reachDist), "BarricadeProp") or nearest(reachDist, true)
 	end)
 end
 
