@@ -1,162 +1,35 @@
 --!nonstrict
--- Витрина. Цены с сервера. При открытии: мышь свободна, курсор твой,
--- камера не крутится, выстрел заблокирован.
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-
-local Shared = game.ReplicatedStorage.LastWaveShared
-local Config = require(Shared.Config)
-local Remotes = require(Shared.Remotes)
-local ClientState = require(script.Parent.ClientState)
-
-local ShopController = {}
-
-local localPlayer = Players.LocalPlayer
-local catalog = {}
-local isOpen = false
-local frame, list, hint
-
-local function costText(cost)
-	local parts = {}
-	for k, v in cost do table.insert(parts, k .. " " .. v) end
-	return table.concat(parts, " + ")
-end
-
-local function rebuild()
-	if not list then return end
-	for _, c in list:GetChildren() do
-		if c:IsA("TextButton") then c:Destroy() end
-	end
-	for i, item in catalog do
-		local b = Instance.new("TextButton")
-		b.Size = UDim2.new(1, -12, 0, 36)
-		b.BackgroundColor3 = if item.owned then Color3.fromRGB(28, 48, 32) else Color3.fromRGB(38, 38, 48)
-		b.TextColor3 = Color3.new(1, 1, 1)
-		b.Font = Enum.Font.Gotham
-		b.TextSize = 14
-		b.AutoButtonColor = true
-		b.Text = item.name .. "  [" .. costText(item.cost) .. "]" .. (if item.owned then "  ✓" else "")
-		b.LayoutOrder = i
-		b.Parent = list
-		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-		b.MouseButton1Click:Connect(function()
-			Remotes.PurchaseRequest:FireServer(item.id)
-		end)
-	end
-end
-
+local Players=game:GetService("Players")
+local UserInputService=game:GetService("UserInputService")
+local Shared=game.ReplicatedStorage.LastWaveShared
+local Config=require(Shared.Config)
+local Remotes=require(Shared.Remotes)
+local ClientState=require(script.Parent.ClientState)
+local ShopController={}
+local player=Players.LocalPlayer
+local catalog={};local isOpen=false;local frame,list
+local function costText(cost)local out={};for k,v in cost do table.insert(out,k.." "..v)end;return table.concat(out," + ")end
+local function rebuild()if not list then return end;for _,c in list:GetChildren()do if c:IsA("TextButton")then c:Destroy()end end;for i,item in catalog do local b=Instance.new("TextButton");b.Size=UDim2.new(1,-12,0,36);b.BackgroundColor3=if item.owned then Color3.fromRGB(28,48,32)else Color3.fromRGB(38,38,48);b.TextColor3=Color3.new(1,1,1);b.Font=Enum.Font.Gotham;b.TextSize=14;b.Text=item.name.."  ["..costText(item.cost).."]"..(if item.owned then "  ✓"else"");b.LayoutOrder=i;b.Parent=list;Instance.new("UICorner",b).CornerRadius=UDim.new(0,6);b.Activated:Connect(function()if isOpen then Remotes.PurchaseRequest:FireServer(item.id)end end)end end
 local function build()
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "LastWaveShop"
-	gui.ResetOnSpawn = false
-	gui.DisplayOrder = 20
-	gui.Parent = localPlayer:WaitForChild("PlayerGui")
-
-	frame = Instance.new("Frame")
-	frame.Size = UDim2.fromOffset(380, 420)
-	frame.Position = UDim2.new(0.5, -190, 0.5, -210)
-	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
-	frame.Visible = false
-	frame.BorderSizePixel = 0
-	frame.Active = true -- ловит клики, чтобы они не уходили в игру
-	frame.Parent = gui
-	Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
-
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, 0, 0, 34)
-	title.BackgroundTransparency = 1
-	title.Text = "СНАБЖЕНИЕ (" .. (Config.SHOP_KEY_HINT or "B") .. ")"
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 18
-	title.TextColor3 = Color3.new(1, 1, 1)
-	title.Parent = frame
-
-	hint = Instance.new("TextLabel")
-	hint.Size = UDim2.new(1, 0, 0, 16)
-	hint.Position = UDim2.fromOffset(0, 32)
-	hint.BackgroundTransparency = 1
-	hint.Text = "Мышь свободна. Закрыть: B или Esc"
-	hint.Font = Enum.Font.Gotham
-	hint.TextSize = 12
-	hint.TextColor3 = Color3.fromRGB(160, 160, 175)
-	hint.Parent = frame
-
-	local close = Instance.new("TextButton")
-	close.Size = UDim2.fromOffset(30, 30)
-	close.Position = UDim2.new(1, -36, 0, 4)
-	close.BackgroundColor3 = Color3.fromRGB(60, 30, 34)
-	close.Text = "X"
-	close.Font = Enum.Font.GothamBold
-	close.TextSize = 16
-	close.TextColor3 = Color3.new(1, 1, 1)
-	close.Parent = frame
-	Instance.new("UICorner", close).CornerRadius = UDim.new(1, 0)
-	close.MouseButton1Click:Connect(function() ShopController.SetOpen(false) end)
-
-	list = Instance.new("ScrollingFrame")
-	list.Size = UDim2.new(1, -12, 1, -62)
-	list.Position = UDim2.fromOffset(6, 56)
-	list.BackgroundTransparency = 1
-	list.BorderSizePixel = 0
-	list.CanvasSize = UDim2.new()
-	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	list.ScrollBarThickness = 5
-	list.Parent = frame
-
-	local layout = Instance.new("UIListLayout")
-	layout.Padding = UDim.new(0, 6)
-	layout.Parent = list
+	local gui=Instance.new("ScreenGui");gui.Name="LastWaveShop";gui.ResetOnSpawn=false;gui.DisplayOrder=20;gui.Parent=player:WaitForChild("PlayerGui")
+	frame=Instance.new("Frame");frame.Size=UDim2.fromOffset(380,420);frame.Position=UDim2.new(.5,-190,.5,-210);frame.BackgroundColor3=Color3.fromRGB(20,20,26);frame.Visible=false;frame.Active=true;frame.Parent=gui;Instance.new("UICorner",frame).CornerRadius=UDim.new(0,12)
+	local title=Instance.new("TextLabel");title.Size=UDim2.new(1,0,0,34);title.BackgroundTransparency=1;title.Text="СНАБЖЕНИЕ ("..(Config.SHOP_KEY_HINT or "B")..")";title.Font=Enum.Font.GothamBold;title.TextSize=18;title.TextColor3=Color3.new(1,1,1);title.Parent=frame
+	local hint=Instance.new("TextLabel");hint.Size=UDim2.new(1,0,0,16);hint.Position=UDim2.fromOffset(0,32);hint.BackgroundTransparency=1;hint.Text="Мышь свободна. Закрыть: B или Esc";hint.Font=Enum.Font.Gotham;hint.TextSize=12;hint.TextColor3=Color3.fromRGB(160,160,175);hint.Parent=frame
+	local close=Instance.new("TextButton");close.Size=UDim2.fromOffset(30,30);close.Position=UDim2.new(1,-36,0,4);close.Text="X";close.Parent=frame;Instance.new("UICorner",close).CornerRadius=UDim.new(1,0);close.Activated:Connect(function()ShopController.SetOpen(false)end)
+	list=Instance.new("ScrollingFrame");list.Size=UDim2.new(1,-12,1,-62);list.Position=UDim2.fromOffset(6,56);list.BackgroundTransparency=1;list.BorderSizePixel=0;list.AutomaticCanvasSize=Enum.AutomaticSize.Y;list.ScrollBarThickness=5;list.Parent=frame;local layout=Instance.new("UIListLayout");layout.Padding=UDim.new(0,6);layout.Parent=list
 end
-
-function ShopController.IsOpen(): boolean
-	return isOpen
+function ShopController.IsOpen()return isOpen end
+function ShopController.SetOpen(open:boolean)
+	if not frame or open==isOpen then return end
+	isOpen=open;frame.Visible=open;ClientState.SetUILock(open)
+	if open then task.spawn(function()local ok,c=pcall(function()return Remotes.GetShopCatalog:InvokeServer()end);if ok and c then catalog=c;rebuild()end end)end
 end
-
-function ShopController.SetOpen(open: boolean)
-	if not frame or open == isOpen then return end
-	isOpen = open
-	frame.Visible = open
-	ClientState.SetUILock(open) -- мышь + камера + блок стрельбы
-	if open then
-		task.spawn(function()
-			local ok, c = pcall(function() return Remotes.GetShopCatalog:InvokeServer() end)
-			if ok and c then catalog = c; rebuild() end
-		end)
-	end
-end
-
-function ShopController.Toggle()
-	ShopController.SetOpen(not isOpen)
-end
-
+function ShopController.Toggle()ShopController.SetOpen(not isOpen)end
 function ShopController.Init()
-	build()
-
-	Remotes.ShopCatalogPush.OnClientEvent:Connect(function(c)
-		catalog = c
-		rebuild()
+	build();Remotes.ShopCatalogPush.OnClientEvent:Connect(function(c)catalog=c;rebuild()end)
+	UserInputService.InputBegan:Connect(function(input,processed)
+		if input.KeyCode==Enum.KeyCode.B and not processed then ShopController.Toggle() elseif input.KeyCode==Enum.KeyCode.Escape and isOpen then ShopController.SetOpen(false) end
 	end)
-
-	task.spawn(function()
-		local ok, c = pcall(function() return Remotes.GetShopCatalog:InvokeServer() end)
-		if ok and c then catalog = c; rebuild() end
-	end)
-
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if input.KeyCode == Enum.KeyCode.B and not processed then
-			ShopController.Toggle()
-		elseif input.KeyCode == Enum.KeyCode.Escape and isOpen then
-			ShopController.SetOpen(false)
-		end
-	end)
-
-	-- умер или превратился в зомби с открытым магазином - закрываем
-	localPlayer.CharacterAdded:Connect(function(char)
-		task.wait(0.3)
-		if isOpen and char:GetAttribute("Role") ~= "Survivor" then
-			ShopController.SetOpen(false)
-		end
-	end)
+	player.CharacterAdded:Connect(function(char)task.wait(.3);if isOpen and char:GetAttribute("Role")~="Survivor" then ShopController.SetOpen(false)end end)
 end
-
 return ShopController
