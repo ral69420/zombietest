@@ -1,19 +1,27 @@
 --!nonstrict
+-- Блокировка управления под меню. Считаем ПРИЧИНЫ, а не один флаг:
+-- два открытых окна больше не гасят блокировку друг друга и она не залипает навсегда.
 local Players=game:GetService("Players")
 local UserInputService=game:GetService("UserInputService")
 local ContextActionService=game:GetService("ContextActionService")
 local Workspace=game:GetService("Workspace")
 local Config=require(game.ReplicatedStorage.LastWaveShared.Config)
-local ClientState={};local player=Players.LocalPlayer;local locked=false;local saved=nil;local ACTION="LastWaveShopBlock"
+local ClientState={};local player=Players.LocalPlayer;local locked=false;local saved=nil;local ACTION="LastWaveShopBlock";local reasons={};local count=0;local bound=false
 ClientState.Changed=Instance.new("BindableEvent")
 function ClientState.IsUILocked()return locked end
 function ClientState.ApplyMouseIcon()if Config.MOUSE_ICON and Config.MOUSE_ICON~=""then player:GetMouse().Icon=Config.MOUSE_ICON end end
 local function sink()return Enum.ContextActionResult.Sink end
-function ClientState.SetUILock(on:boolean)
- if on==locked then return end;locked=on;local camera=Workspace.CurrentCamera;local hum=player.Character and player.Character:FindFirstChildWhichIsA("Humanoid")
- if on then saved={behavior=UserInputService.MouseBehavior,iconEnabled=UserInputService.MouseIconEnabled,autoRotate=hum and hum.AutoRotate,walkSpeed=hum and hum.WalkSpeed,jumpPower=hum and hum.JumpPower};ContextActionService:BindActionAtPriority(ACTION,sink,false,Enum.ContextActionPriority.High.Value,Enum.PlayerActions.CharacterForward,Enum.PlayerActions.CharacterBackward,Enum.PlayerActions.CharacterLeft,Enum.PlayerActions.CharacterRight,Enum.PlayerActions.CharacterJump);UserInputService.MouseBehavior=Enum.MouseBehavior.Default;UserInputService.MouseIconEnabled=true;ClientState.ApplyMouseIcon();if camera then camera.CameraType=Enum.CameraType.Scriptable end;if hum then hum.AutoRotate=false;hum.WalkSpeed=0;hum.JumpPower=0 end
- else ContextActionService:UnbindAction(ACTION);UserInputService.MouseBehavior=(saved and saved.behavior)or Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=(saved and saved.iconEnabled)or false;if camera then camera.CameraType=Enum.CameraType.Scriptable end;if hum then hum.AutoRotate=(saved and saved.autoRotate)~=false;hum.WalkSpeed=saved and saved.walkSpeed or hum.WalkSpeed;hum.JumpPower=saved and saved.jumpPower or hum.JumpPower end;saved=nil end
+local function humanoid()local c=player.Character;return c and c:FindFirstChildWhichIsA("Humanoid")end
+local function freeze()return Config.UI~=nil and Config.UI.FreezeInMenus==true end
+local function bind(on)if on==bound then return end;bound=on;if on then ContextActionService:BindActionAtPriority(ACTION,sink,false,Enum.ContextActionPriority.High.Value,Enum.PlayerActions.CharacterForward,Enum.PlayerActions.CharacterBackward,Enum.PlayerActions.CharacterLeft,Enum.PlayerActions.CharacterRight,Enum.PlayerActions.CharacterJump)else ContextActionService:UnbindAction(ACTION)end end
+local function apply()
+ local on=count>0;if on==locked then return end;locked=on;local camera=Workspace.CurrentCamera;local hum=humanoid()
+ if on then saved={behavior=UserInputService.MouseBehavior,iconEnabled=UserInputService.MouseIconEnabled,autoRotate=hum and hum.AutoRotate,walkSpeed=hum and hum.WalkSpeed,jumpPower=hum and hum.JumpPower};bind(freeze());UserInputService.MouseBehavior=Enum.MouseBehavior.Default;UserInputService.MouseIconEnabled=true;ClientState.ApplyMouseIcon();if camera then camera.CameraType=Enum.CameraType.Scriptable end;if hum then hum.AutoRotate=false;if freeze()then hum.WalkSpeed=0;hum.JumpPower=0 end end
+ else bind(false);UserInputService.MouseBehavior=Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=false;if camera then camera.CameraType=Enum.CameraType.Scriptable end;if hum then hum.AutoRotate=(saved and saved.autoRotate)~=false;local ws=(saved and saved.walkSpeed)or 0;local jp=(saved and saved.jumpPower)or 0;hum.WalkSpeed=ws>0 and ws or 16;hum.JumpPower=jp>0 and jp or 50 end;saved=nil end
  ClientState.Changed:Fire(locked)
 end
-function ClientState.Init()ClientState.ApplyMouseIcon();player.CharacterAdded:Connect(function()task.wait(.2);ClientState.ApplyMouseIcon();if locked then local hum=player.Character and player.Character:FindFirstChildWhichIsA("Humanoid");if hum then hum.WalkSpeed=0;hum.JumpPower=0 end;UserInputService.MouseBehavior=Enum.MouseBehavior.Default;UserInputService.MouseIconEnabled=true end end)end
+function ClientState.SetLock(reason:string,on:boolean)if on then if not reasons[reason]then reasons[reason]=true;count+=1 end else if reasons[reason]then reasons[reason]=nil;count-=1 end end;if count<0 then count=0 end;apply()end
+function ClientState.SetUILock(on:boolean)ClientState.SetLock("UI",on)end
+function ClientState.ForceUnlock()table.clear(reasons);count=0;apply()end
+function ClientState.Init()ClientState.ApplyMouseIcon();player.CharacterAdded:Connect(function()task.wait(.2);ClientState.ApplyMouseIcon();local hum=humanoid();if locked then bind(freeze());if hum and freeze()then hum.WalkSpeed=0;hum.JumpPower=0 end;UserInputService.MouseBehavior=Enum.MouseBehavior.Default;UserInputService.MouseIconEnabled=true else bind(false);UserInputService.MouseBehavior=Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=false end end)end
 return ClientState

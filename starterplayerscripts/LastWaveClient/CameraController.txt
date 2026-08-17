@@ -1,19 +1,30 @@
---!strict
+--!nonstrict
+-- Вид от первого лица. ВАЖНО: при CameraType=Scriptable штатный TransparencyController
+-- из PlayerModule не работает, поэтому свою голову, лицо и аксессуары прячем сами.
+-- Плюс камера выносится немного вперёд из головы, иначе видно её изнутри.
 local Players=game:GetService("Players")
 local RunService=game:GetService("RunService")
 local UserInputService=game:GetService("UserInputService")
 local Workspace=game:GetService("Workspace")
 local CameraController={};local player=Players.LocalPlayer;local camera=Workspace.CurrentCamera;local ClientState=require(script.Parent.ClientState)
-local yaw,pitch=0,0;local renderConn:RBXScriptConnection?;local stateConn:RBXScriptConnection?;local BASE_FOV=90
-local function resetCamera()if renderConn then renderConn:Disconnect();renderConn=nil end;if stateConn then stateConn:Disconnect();stateConn=nil end;camera=Workspace.CurrentCamera;if camera then camera.CameraType=Enum.CameraType.Custom;camera.CameraSubject=nil end end
+local yaw,pitch=0,0;local renderConn:RBXScriptConnection?;local stateConn:RBXScriptConnection?;local descConn:RBXScriptConnection?;local BASE_FOV=90;local EYE_UP=.35;local EYE_FWD=.45
+local hidden={}
+local function watch(d)if d:IsA("BasePart")and(d.Name=="Head"or d:FindFirstAncestorWhichIsA("Accoutrement"))then hidden[d]=true elseif(d:IsA("Decal")or d:IsA("Texture"))and d.Parent and d.Parent.Name=="Head"then hidden[d]=true end end
+local function hide()for i in hidden do if i.Parent then i.LocalTransparencyModifier=1 else hidden[i]=nil end end end
+local function unhide()for i in hidden do if i.Parent then i.LocalTransparencyModifier=0 end end;table.clear(hidden)end
+local function resetCamera()if renderConn then renderConn:Disconnect();renderConn=nil end;if stateConn then stateConn:Disconnect();stateConn=nil end;if descConn then descConn:Disconnect();descConn=nil end;unhide();camera=Workspace.CurrentCamera;if camera then camera.CameraType=Enum.CameraType.Custom;camera.CameraSubject=nil end end
 local function setup(char:Model)
- resetCamera();local hum=char:WaitForChild("Humanoid",10)::Humanoid?;local root=char:WaitForChild("HumanoidRootPart",10)::BasePart?;local head=char:FindFirstChild("Head")::BasePart?;if not hum or not root then return end;head=head or root;camera=Workspace.CurrentCamera;hum.AutoRotate=true;if not ClientState.IsUILocked()then UserInputService.MouseBehavior=Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=false end;if camera then camera.CameraType=Enum.CameraType.Scriptable;camera.FieldOfView=BASE_FOV end
+ resetCamera();local hum=char:WaitForChild("Humanoid",10)::Humanoid?;local root=char:WaitForChild("HumanoidRootPart",10)::BasePart?;local head=char:FindFirstChild("Head")::BasePart?;if not hum or not root then return end;head=head or root;camera=Workspace.CurrentCamera;hum.AutoRotate=true;if not ClientState.IsUILocked()then UserInputService.MouseBehavior=Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=false end;if camera then camera.CameraType=Enum.CameraType.Scriptable;camera.CameraSubject=hum;camera.FieldOfView=BASE_FOV end
+ table.clear(hidden);for _,d in char:GetDescendants()do watch(d)end;descConn=char.DescendantAdded:Connect(watch);hide()
  stateConn=hum.Died:Connect(resetCamera)
  renderConn=RunService.RenderStepped:Connect(function(dt)
-  if not char.Parent or not root.Parent or hum.Health<=0 then resetCamera();return end;if ClientState.IsUILocked()then return end;UserInputService.MouseBehavior=Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=false;local delta=UserInputService:GetMouseDelta();yaw=(yaw-delta.X*.18)%360;pitch=math.clamp(pitch-delta.Y*.18,-80,80);local moving=root.AssemblyLinearVelocity*Vector3.new(1,0,1);local fov=BASE_FOV+(moving.Magnitude>1 and 8 or 0);camera.CFrame=CFrame.new(head.Position)*CFrame.Angles(0,math.rad(yaw),0)*CFrame.Angles(math.rad(pitch),0,0)*CFrame.new(0,.35,0);camera.FieldOfView=camera.FieldOfView+(fov-camera.FieldOfView)*math.min(dt*8,1);root.CFrame=CFrame.new(root.Position)*CFrame.Angles(0,math.rad(yaw),0)
+  if not char.Parent or not root.Parent or hum.Health<=0 then resetCamera();return end;hide();local locked=ClientState.IsUILocked()
+  if not locked then UserInputService.MouseBehavior=Enum.MouseBehavior.LockCenter;UserInputService.MouseIconEnabled=false;local delta=UserInputService:GetMouseDelta();yaw=(yaw-delta.X*.18)%360;pitch=math.clamp(pitch-delta.Y*.18,-80,80)end
+  local moving=root.AssemblyLinearVelocity*Vector3.new(1,0,1);local fov=BASE_FOV+(moving.Magnitude>1 and 8 or 0);camera.CFrame=CFrame.new(head.Position+Vector3.new(0,EYE_UP,0))*CFrame.Angles(0,math.rad(yaw),0)*CFrame.Angles(math.rad(pitch),0,0)*CFrame.new(0,0,-EYE_FWD);camera.FieldOfView=camera.FieldOfView+(fov-camera.FieldOfView)*math.min(dt*8,1)
+  if not locked then root.CFrame=CFrame.new(root.Position)*CFrame.Angles(0,math.rad(yaw),0)end
  end)
 end
 function CameraController.Init()
- player.CharacterAdded:Connect(setup);player.CharacterRemoving:Connect(resetCamera);ClientState.Changed.Event:Connect(function(locked)if locked then if camera then camera.CameraType=Enum.CameraType.Scriptable end else task.defer(function()if player.Character then setup(player.Character)end end)end end);if player.Character then setup(player.Character)end
+ player.CharacterAdded:Connect(setup);player.CharacterRemoving:Connect(resetCamera);if player.Character then setup(player.Character)end
 end
 return CameraController

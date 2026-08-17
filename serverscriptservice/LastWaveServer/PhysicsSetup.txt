@@ -8,6 +8,7 @@ local PhysicsSetup = {}
 local GROUPS = {
 	Config.GROUP_PROP, Config.GROUP_CARRIED,
 	Config.GROUP_ZOMBIE, Config.GROUP_SURVIVOR, Config.GROUP_DEBRIS,
+	Config.GROUP_LOOSE_HEAVY, Config.GROUP_LOOSE_LIGHT,
 }
 
 function PhysicsSetup.Init()
@@ -32,6 +33,19 @@ function PhysicsSetup.Init()
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_SURVIVOR, collide)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_ZOMBIE, collide)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_DEBRIS, true)
+
+	-- Лежащие пропы. Коллизия у них есть всегда, разница только в том, кого они блокируют.
+	local LH, LL = Config.GROUP_LOOSE_HEAVY, Config.GROUP_LOOSE_LIGHT
+	local function set(a, b, v) PhysicsService:CollisionGroupSetCollidable(a, b, v) end
+	-- Heavy/Meme: настоящее препятствие, стоит стеной пока не подняли
+	set(LH, Config.GROUP_SURVIVOR, true); set(LH, Config.GROUP_ZOMBIE, true)
+	set(LH, Config.GROUP_PROP, true); set(LH, LH, true); set(LH, LL, true)
+	set(LH, Config.GROUP_CARRIED, false)
+	-- Light/Medium: с миром и пропами сталкиваются, тела сквозь них проходят (чтобы не застревать в мелочи)
+	set(LL, Config.GROUP_SURVIVOR, false); set(LL, Config.GROUP_ZOMBIE, false)
+	set(LL, Config.GROUP_PROP, true); set(LL, LL, true)
+	set(LL, Config.GROUP_CARRIED, false)
+	set(Config.GROUP_DEBRIS, LH, true); set(Config.GROUP_DEBRIS, LL, true)
 end
 
 function PhysicsSetup.ApplyToCharacter(char: Model, role: string)
