@@ -1,5 +1,6 @@
 --!nonstrict
 local Players=game:GetService("Players");local Workspace=game:GetService("Workspace");local RunService=game:GetService("RunService")
+local CollectionService=game:GetService("CollectionService")
 local Shared=game.ReplicatedStorage.LastWaveShared;local Config=require(Shared.Config);local Remotes=require(Shared.Remotes);local Sanity=require(Shared.Sanity);local Kits=require(Shared.SurvivorKits);local ZombieTypes=require(Shared.ZombieTypes)
 local AntiCheat=require(script.Parent.AntiCheat);local Physics=require(script.Parent.PhysicsSetup);local Economy=require(script.Parent.EconomyManager);local Score=require(script.Parent.ScoreManager);local Weapons=require(script.Parent.WeaponManager);local Match=require(script.Parent.MatchState);local Analytics=require(script.Parent.AnalyticsManager);local ZombieRig=require(script.Parent.ZombieRig)
 local M={};local data={};local reviveJobs={};local token={};local pending={};local lastSpawn={}
@@ -30,6 +31,55 @@ function M.GetAllSurvivors()local out={};for p,d in data do if d.Team=="Survivor
 function M.GetAliveStanding()local out={};for _,p in M.GetAllSurvivors()do if not data[p].Downed then table.insert(out,p)end end;return out end
 function M.GetAllZombies()local out={};for p,d in data do if d.Team=="Zombie"then table.insert(out,p)end end;return out end
 function M.IsDowned(p)return data[p]~=nil and data[p].Downed end
-local function movement(dt)for p,d in data do local c=p.Character;local h=c and c:FindFirstChildWhichIsA("Humanoid");if h and h.Health>0 then if d.Team~="Survivor"then local z=ZombieTypes[d.ZombieClass]or ZombieTypes.Walker;h.WalkSpeed=z.WalkSpeed;continue end;if d.Downed then h.WalkSpeed=Config.DOWNED_WALKSPEED;continue end;local k=Kits[d.Kit]or Kits.Builder;local moving=h.MoveDirection.Magnitude>.1;local carry=c:GetAttribute("CarryMultiplier")or 1;if d.Sprinting and moving and d.Stamina>0 then h.WalkSpeed=k.SprintSpeed*carry;d.Stamina=math.max(0,d.Stamina-Config.STAMINA_DRAIN*dt);d.LastSprint=os.clock()else h.WalkSpeed=k.WalkSpeed*carry;if os.clock()-d.LastSprint>Config.STAMINA_REGEN_DELAY then d.Stamina=math.min(Config.STAMINA_MAX,d.Stamina+Config.STAMINA_REGEN*dt)end end;c:SetAttribute("Stamina",math.floor(d.Stamina))end end end
+
+local function isInsideBarricade(pos: Vector3): boolean
+	for _, prop in CollectionService:GetTagged("BarricadeProp") do
+		if prop:GetAttribute("IsNailed") == true then
+			local cf, size = if prop:IsA("Model") then prop:GetBoundingBox() else prop.CFrame, (if prop:IsA("BasePart") then prop.Size else Vector3.one * 3)
+			local localPos = cf:PointToObjectSpace(pos)
+			local h = size * 0.5 + Vector3.new(0.5, 0.5, 0.5)
+			if math.abs(localPos.X) <= h.X and math.abs(localPos.Y) <= h.Y and math.abs(localPos.Z) <= h.Z then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function movement(dt)
+	for p, d in data do
+		local c = p.Character
+		local h = c and c:FindFirstChildWhichIsA("Humanoid")
+		local r = c and c:FindFirstChild("HumanoidRootPart")
+		if h and h.Health > 0 then
+			if d.Team ~= "Survivor" then
+				local z = ZombieTypes[d.ZombieClass] or ZombieTypes.Walker
+				h.WalkSpeed = z.WalkSpeed
+				continue
+			end
+			if d.Downed then
+				h.WalkSpeed = Config.DOWNED_WALKSPEED
+				continue
+			end
+			local k = Kits[d.Kit] or Kits.Builder
+			local moving = h.MoveDirection.Magnitude > 0.1
+			local carry = c:GetAttribute("CarryMultiplier") or 1
+			local insideSlow = (r and isInsideBarricade(r.Position)) and 0.45 or 1.0
+
+			if d.Sprinting and moving and d.Stamina > 0 then
+				h.WalkSpeed = k.SprintSpeed * carry * insideSlow
+				d.Stamina = math.max(0, d.Stamina - Config.STAMINA_DRAIN * dt)
+				d.LastSprint = os.clock()
+			else
+				h.WalkSpeed = k.WalkSpeed * carry * insideSlow
+				if os.clock() - d.LastSprint > Config.STAMINA_REGEN_DELAY then
+					d.Stamina = math.min(Config.STAMINA_MAX, d.Stamina + Config.STAMINA_REGEN * dt)
+				end
+			end
+			c:SetAttribute("Stamina", math.floor(d.Stamina))
+		end
+	end
+end
+
 function M.Init()local function hook(p)get(p);p.CharacterAdded:Connect(function(c)M.OnCharacterSpawned(p,c)end)end;Players.PlayerAdded:Connect(hook);for _,p in Players:GetPlayers()do hook(p)end;Players.PlayerRemoving:Connect(function(p)data[p]=nil;reviveJobs[p]=nil;token[p]=nil;pending[p]=nil;lastSpawn[p]=nil end);AntiCheat.Bind(Remotes.SprintRequest,"SprintRequest",function(p,v)if type(v)=="boolean"and data[p]then data[p].Sprinting=v end end);AntiCheat.Bind(Remotes.ReviveRequest,"ReviveRequest",revive);AntiCheat.Bind(Remotes.KitSelectRequest,"KitSelectRequest",function(p,k)if Sanity.str(k,24)and(Match.Phase()=="Intermission"or Match.Phase()=="Preparation")then M.SetKit(p,k)end end);AntiCheat.Bind(Remotes.ZombieClassRequest,"ZombieClassRequest",function(p,k)if Sanity.str(k,24)then M.SetZombieClass(p,k)end end);RunService.Heartbeat:Connect(function(dt)pcall(movement,dt)end);task.spawn(function()while true do task.wait(Config.RESPAWN_WATCHDOG);for _,p in Players:GetPlayers()do local d=data[p];local c=p.Character;local h=c and c:FindFirstChildWhichIsA("Humanoid");if d and not pending[p]and((not c)or not c.Parent or not h or h.Health<=0)then M.ScheduleRespawn(p,.25,"watchdog")end end end end)end
 return M
