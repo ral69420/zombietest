@@ -1,259 +1,41 @@
 --!nonstrict
--- Молоток:
--- ЛКМ чинит баррикаду.
--- ПКМ с удержанием снимает баррикаду.
--- Оружие не убирается, стрелять с молотком можно.
-
-local Players = game:GetService("Players")
-local ServerStorage = game:GetService("ServerStorage")
-
-local Shared = game.ReplicatedStorage:WaitForChild("LastWaveShared")
-local Config = require(Shared:WaitForChild("Config"))
-local Remotes = require(Shared:WaitForChild("Remotes"))
-local Sanity = require(Shared:WaitForChild("Sanity"))
-
-local AntiCheat = require(script.Parent:WaitForChild("AntiCheat"))
-local BarricadeManager = require(script.Parent:WaitForChild("BarricadeManager"))
-
-local HammerManager = {}
-local H = Config.HAMMER
-
-local HAMMER_NAME = "Hammer"
-
-local function buildDefault(): Tool
-	local tool = Instance.new("Tool")
-	tool.Name = HAMMER_NAME
-	tool.ToolTip = "ЛКМ чинит баррикаду, ПКМ удерживать для снятия"
-	tool.CanBeDropped = false
-	tool.RequiresHandle = true
-	tool.Grip = H.Grip
-
-	local handle = Instance.new("Part")
-	handle.Name = "Handle"
-	handle.Size = Vector3.new(0.3, 2, 0.3)
-	handle.Color = Color3.fromRGB(120, 85, 50)
-	handle.Material = Enum.Material.Wood
-	handle.CanCollide = false
-	handle.CanTouch = false
-	handle.CanQuery = false
-	handle.Massless = true
-	handle.Parent = tool
-
-	local head = Instance.new("Part")
-	head.Name = "HammerHead"
-	head.Size = Vector3.new(0.55, 0.5, 1.1)
-	head.Color = Color3.fromRGB(150, 150, 162)
-	head.Material = Enum.Material.Metal
-	head.CanCollide = false
-	head.CanTouch = false
-	head.CanQuery = false
-	head.Massless = true
-	head.CFrame = handle.CFrame * CFrame.new(0, 0.95, 0)
-	head.Parent = tool
-
-	local weld = Instance.new("WeldConstraint")
-	weld.Part0 = handle
-	weld.Part1 = head
-	weld.Parent = handle
-
-	return tool
+local Players=game:GetService("Players")
+local ServerStorage=game:GetService("ServerStorage")
+local Shared=game.ReplicatedStorage:WaitForChild("LastWaveShared")
+local Config=require(Shared.Config)
+local Remotes=require(Shared.Remotes)
+local Sanity=require(Shared.Sanity)
+local AntiCheat=require(script.Parent.AntiCheat)
+local BarricadeManager=require(script.Parent.BarricadeManager)
+local HammerManager={};local H=Config.HAMMER;local NAME="Hammer"
+local function defaultTool():Tool
+ local t=Instance.new("Tool");t.Name=NAME;t.ToolTip="ЛКМ чинит, ПКМ удерживать для снятия";t.CanBeDropped=false;t.RequiresHandle=true;t.Grip=H.Grip
+ local h=Instance.new("Part");h.Name="Handle";h.Size=Vector3.new(.3,2,.3);h.Color=Color3.fromRGB(120,85,50);h.CanCollide=false;h.CanTouch=false;h.CanQuery=false;h.Massless=true;h.Parent=t
+ local head=Instance.new("Part");head.Name="HammerHead";head.Size=Vector3.new(.55,.5,1.1);head.Color=Color3.fromRGB(150,150,162);head.CanCollide=false;head.CanTouch=false;head.CanQuery=false;head.Massless=true;head.CFrame=h.CFrame*CFrame.new(0,.95,0);head.Parent=t
+ local w=Instance.new("WeldConstraint");w.Part0=h;w.Part1=head;w.Parent=h;return t
 end
-
-local function getTemplate(): Tool
-	local folder = ServerStorage:FindFirstChild("ToolModels")
-	local template = folder and folder:FindFirstChild(H.ModelName)
-
-	if template and template:IsA("Tool") then
-		local clone = template:Clone()
-		clone.Name = HAMMER_NAME
-		clone.CanBeDropped = false
-		clone.RequiresHandle = true
-		clone.Grip = H.Grip
-		return clone
-	end
-
-	return buildDefault()
+local function template():Tool
+ local f=ServerStorage:FindFirstChild("ToolModels");local t=f and f:FindFirstChild(H.ModelName);if t and t:IsA("Tool") then local c=t:Clone();c.Name=NAME;c.CanBeDropped=false;c.RequiresHandle=true;c.Grip=H.Grip;return c end;return defaultTool()
 end
-
-local function getHammerInCharacter(player: Player): Tool?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-
-	local hammer = character:FindFirstChild(HAMMER_NAME)
-	if hammer and hammer:IsA("Tool") then
-		return hammer
-	end
-
-	return nil
+local function characterHammer(p:Player):Tool?local c=p.Character;local t=c and c:FindFirstChild(NAME);return t and t:IsA("Tool") and t or nil end
+local function backpackHammer(p:Player):Tool?local b=p:FindFirstChildOfClass("Backpack");local t=b and b:FindFirstChild(NAME);return t and t:IsA("Tool") and t or nil end
+function HammerManager.Give(p:Player)
+ if not H.Enabled then return end;local c=p.Character;local b=p:FindFirstChildOfClass("Backpack");if not c or not b or c:FindFirstChild(NAME) or b:FindFirstChild(NAME) then return end
+ local t=template();t.Parent=b
+ t.Equipped:Connect(function()if p.Parent then c:SetAttribute("HammerEquipped",true)end end)
+ t.Unequipped:Connect(function()if p.Parent then c:SetAttribute("HammerEquipped",false);BarricadeManager.CancelDismantle(p)end end)
+ t.AncestryChanged:Connect(function(_,parent)if not parent then BarricadeManager.CancelDismantle(p)end end)
+ -- intentionally not auto-equipped: survivor starts with weapon in hand, hammer is selected explicitly
+ c:SetAttribute("HammerEquipped",false)
 end
-
-local function getHammerInBackpack(player: Player): Tool?
-	local backpack = player:FindFirstChildOfClass("Backpack")
-	if not backpack then
-		return nil
-	end
-
-	local hammer = backpack:FindFirstChild(HAMMER_NAME)
-	if hammer and hammer:IsA("Tool") then
-		return hammer
-	end
-
-	return nil
+function HammerManager.Remove(p:Player)
+ local c=p.Character;local b=p:FindFirstChildOfClass("Backpack");local a=c and c:FindFirstChild(NAME);if a then a:Destroy()end;local d=b and b:FindFirstChild(NAME);if d then d:Destroy()end;if c then c:SetAttribute("HammerEquipped",false)end;BarricadeManager.CancelDismantle(p)
 end
-
-local function hasHammer(player: Player): boolean
-	return getHammerInCharacter(player) ~= nil
-		or getHammerInBackpack(player) ~= nil
-end
-
-local function setHammerState(player: Player, equipped: boolean)
-	local character = player.Character
-	if not character then
-		return
-	end
-
-	character:SetAttribute("HammerEquipped", equipped)
-
-	-- Оружие специально НЕ отсоединяем.
-	-- WeaponRig остаётся на персонаже, поэтому можно стрелять с молотком.
-end
-
-function HammerManager.Give(player: Player)
-	if not H.Enabled then
-		return
-	end
-
-	local character = player.Character
-	if not character then
-		return
-	end
-
-	if character:FindFirstChild(HAMMER_NAME) then
-		return
-	end
-
-	local backpack = player:FindFirstChildOfClass("Backpack")
-	if not backpack then
-		return
-	end
-
-	if backpack:FindFirstChild(HAMMER_NAME) then
-		return
-	end
-
-	local tool = getTemplate()
-	tool.Parent = backpack
-
-	tool.Equipped:Connect(function()
-		if not player.Parent then
-			return
-		end
-
-		setHammerState(player, true)
-	end)
-
-	tool.Unequipped:Connect(function()
-		if not player.Parent then
-			return
-		end
-
-		setHammerState(player, false)
-		BarricadeManager.CancelDismantle(player)
-	end)
-
-	tool.AncestryChanged:Connect(function(_, parent)
-		if parent == nil then
-			BarricadeManager.CancelDismantle(player)
-		end
-	end)
-
-	if H.AutoEquipOnSpawn then
-		local humanoid = character:FindFirstChildWhichIsA("Humanoid")
-
-		if humanoid then
-			task.defer(function()
-				if tool.Parent == backpack and humanoid.Parent then
-					pcall(function()
-						humanoid:EquipTool(tool)
-					end)
-				end
-			end)
-		end
-	end
-end
-
-function HammerManager.Remove(player: Player)
-	local character = player.Character
-	local backpack = player:FindFirstChildOfClass("Backpack")
-
-	local characterHammer = character and character:FindFirstChild(HAMMER_NAME)
-	if characterHammer then
-		characterHammer:Destroy()
-	end
-
-	local backpackHammer = backpack and backpack:FindFirstChild(HAMMER_NAME)
-	if backpackHammer then
-		backpackHammer:Destroy()
-	end
-
-	if character then
-		character:SetAttribute("HammerEquipped", false)
-	end
-
-	BarricadeManager.CancelDismantle(player)
-end
-
-function HammerManager.IsEquipped(player: Player): boolean
-	return getHammerInCharacter(player) ~= nil
-end
-
+function HammerManager.IsEquipped(p:Player):boolean return characterHammer(p)~=nil and p.Character:GetAttribute("HammerEquipped")==true end
+function HammerManager.HasHammer(p:Player):boolean return characterHammer(p)~=nil or backpackHammer(p)~=nil end
 function HammerManager.Init()
-	AntiCheat.Bind(
-		Remotes.HammerRepairRequest,
-		"HammerRepairRequest",
-		function(player: Player, prop: any)
-			if not HammerManager.IsEquipped(player) then
-				return
-			end
-
-			if not Sanity.inst(prop, "Instance") then
-				return
-			end
-
-			BarricadeManager.Repair(player, prop)
-		end
-	)
-
-	AntiCheat.Bind(
-		Remotes.HammerDismantleRequest,
-		"HammerDismantleRequest",
-		function(player: Player, prop: any, start: any)
-			if type(start) ~= "boolean" then
-				return
-			end
-
-			if not start then
-				BarricadeManager.CancelDismantle(player)
-				return
-			end
-
-			if not HammerManager.IsEquipped(player) then
-				return
-			end
-
-			if not Sanity.inst(prop, "Instance") then
-				return
-			end
-
-			BarricadeManager.BeginDismantle(player, prop)
-		end
-	)
-
-	Players.PlayerRemoving:Connect(function(player)
-		BarricadeManager.CancelDismantle(player)
-	end)
+ AntiCheat.Bind(Remotes.HammerRepairRequest,"HammerRepairRequest",function(p,prop)if not HammerManager.IsEquipped(p) or not Sanity.inst(prop,"Instance")then return end;BarricadeManager.Repair(p,prop)end)
+ AntiCheat.Bind(Remotes.HammerDismantleRequest,"HammerDismantleRequest",function(p,prop,start)if type(start)~="boolean"then return end;if not start then BarricadeManager.CancelDismantle(p);return end;if not HammerManager.IsEquipped(p) or not Sanity.inst(prop,"Instance")then return end;BarricadeManager.BeginDismantle(p,prop)end)
+ Players.PlayerRemoving:Connect(function(p)BarricadeManager.CancelDismantle(p)end)
 end
-
 return HammerManager
