@@ -17,16 +17,17 @@ function PhysicsSetup.Init()
 			PhysicsService:RegisterCollisionGroup(g)
 		end
 	end
-	-- Зомби не блокируют друг друга телами (док: "не блокировать проходы телами")
+	-- Зомби не блокируют друг друга телами
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_ZOMBIE, Config.GROUP_ZOMBIE, false)
-	-- Несомый проп не толкает никого: убирает фling полностью
+	-- Несомый проп не толкает никого: убирает флинг полностью
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_ZOMBIE, false)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_SURVIVOR, false)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_PROP, false)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_CARRIED, Config.GROUP_CARRIED, false)
-	-- Установленная баррикада блокирует всех
+
+	-- Установленная баррикада: зомби блокирует намертво, а выжившие проходят сквозь нее (с замедлением в PlayerManager)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_PROP, Config.GROUP_ZOMBIE, true)
-	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_PROP, Config.GROUP_SURVIVOR, true)
+	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_PROP, Config.GROUP_SURVIVOR, false)
 
 	local collide = Config.CLUTTER.CollideWithPlayers
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_CARRIED, false)
@@ -34,14 +35,13 @@ function PhysicsSetup.Init()
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_ZOMBIE, collide)
 	PhysicsService:CollisionGroupSetCollidable(Config.GROUP_DEBRIS, Config.GROUP_DEBRIS, true)
 
-	-- Лежащие пропы. Коллизия у них есть всегда, разница только в том, кого они блокируют.
+	-- Лежащие пропы
 	local LH, LL = Config.GROUP_LOOSE_HEAVY, Config.GROUP_LOOSE_LIGHT
 	local function set(a, b, v) PhysicsService:CollisionGroupSetCollidable(a, b, v) end
-	-- Heavy/Meme: настоящее препятствие, стоит стеной пока не подняли
-	set(LH, Config.GROUP_SURVIVOR, true); set(LH, Config.GROUP_ZOMBIE, true)
+	set(LH, Config.GROUP_SURVIVOR, false); set(LH, Config.GROUP_ZOMBIE, true)
 	set(LH, Config.GROUP_PROP, true); set(LH, LH, true); set(LH, LL, true)
 	set(LH, Config.GROUP_CARRIED, false)
-	-- Light/Medium: с миром и пропами сталкиваются, тела сквозь них проходят (чтобы не застревать в мелочи)
+
 	set(LL, Config.GROUP_SURVIVOR, false); set(LL, Config.GROUP_ZOMBIE, false)
 	set(LL, Config.GROUP_PROP, true); set(LL, LL, true)
 	set(LL, Config.GROUP_CARRIED, false)
