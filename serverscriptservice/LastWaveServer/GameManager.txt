@@ -43,11 +43,11 @@ end
 function GameManager.OnPlayerJoined(player: Player)
 	task.wait(0.5)
 	if not player.Parent then return end
-	PlayerManager.SetTeam(player, "Lobby")
 	MatchState.PushTo(player)
 	sendKitOptions(player)
 	local phase = MatchState.Phase()
 	if not matchRunning or phase == "Intermission" or phase == "GameOver" then
+		PlayerManager.SetTeam(player, "Lobby")
 		Remotes.Notify:FireClient(player, "lobbyJoined")
 		return
 	end
