@@ -1,110 +1,31 @@
 --!nonstrict
--- PS1-style HUD: sparse layout, muted palette, no stamina bar.
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local UserInputService = game:GetService("UserInputService")
-local StarterGui = game:GetService("StarterGui")
-local Shared = game.ReplicatedStorage.LastWaveShared
-local Config = require(Shared.Config)
-local Remotes = require(Shared.Remotes)
-local HUDController = {}
-local localPlayer = Players.LocalPlayer
-local WeaponController = require(script.Parent.WeaponController)
-
-local gui, topBar, objective, hpBar, resLabel, ammoLabel, downedFrame, reviveBar, notifyLabel
-local survivorLabel, zombieLabel, inventorySlots, tabFrame, tabContent
-local matchState = {Phase="Intermission", Wave=0, EndTime=0, Objective="Подключение…"}
-local resources = {}
-local PHASE_TEXT = {Intermission="ОЖИДАНИЕ", Preparation="СТРОЙКА", Wave="АТАКА", Transition="ОТХОД", GameOver="КОНЕЦ"}
-local PHASE_COLOR = {Wave=Color3.fromRGB(155,75,75), Preparation=Color3.fromRGB(105,135,95), Transition=Color3.fromRGB(150,125,75)}
-local NOTIFY_TEXT = {noResources="Не хватает ресурсов",propLimit="Лимит баррикад в секторе",wrongSize="Объект не влезает в этот проход",wrongSector="Это другой сектор",infected="Баррикада заражена",noMedkit="Нет аптечки",shopClosed="Этот товар сейчас недоступен",alreadyOwned="Уже куплено",joinedAsSurvivor="Ты выживший",joinedAsZombie="Ты заходишь как зомби",lobbyJoined="Ждём начала матча",noAmmo="Патроны кончились",ammoFull="Резерв уже полон",noWeapon="Нет оружия",placeFail="Здесь не встанет",propLimitTotal="На карте слишком много баррикад",dismantled="Баррикада снята",repairFull="Уже целая",notYours="Это не твоя баррикада",nailedHint="Установлено: сними молотком",carry="Несёшь предмет: ЛКМ поставить, R повернуть"}
-
-local C = {bg=Color3.fromRGB(31,30,28), panel=Color3.fromRGB(49,47,43), slot=Color3.fromRGB(68,65,58), line=Color3.fromRGB(137,132,118), text=Color3.fromRGB(203,198,177), muted=Color3.fromRGB(145,140,124), red=Color3.fromRGB(145,71,68), green=Color3.fromRGB(102,131,91), yellow=Color3.fromRGB(151,125,72)}
-local function label(parent, size, pos, text, textSize, color)
-    local l=Instance.new("TextLabel");l.Size=size;l.Position=pos;l.BackgroundTransparency=1;l.TextColor3=color or C.text;l.Font=Enum.Font.Code;l.TextSize=textSize or 16;l.Text=text;l.TextStrokeTransparency=1;l.Parent=parent;return l
-end
-local function panel(parent, size, pos)
-    local f=Instance.new("Frame");f.Size=size;f.Position=pos;f.BackgroundColor3=C.panel;f.BackgroundTransparency=0.08;f.BorderColor3=C.line;f.BorderSizePixel=1;f.Parent=parent;return f
-end
-local function bar(parent,pos,size,color)
-    local back=Instance.new("Frame");back.Size=size;back.Position=pos;back.BackgroundColor3=C.bg;back.BorderColor3=C.line;back.BorderSizePixel=1;back.Parent=parent
-    local fill=Instance.new("Frame");fill.Size=UDim2.fromScale(1,1);fill.BackgroundColor3=color;fill.BorderSizePixel=0;fill.Parent=back;return fill
-end
-local function buildInventory(parent)
-    local frame=panel(parent,UDim2.fromOffset(224,58),UDim2.new(0,14,1,-72));label(frame,UDim2.new(1,-10,0,16),UDim2.fromOffset(5,3),"INVENTORY",10,C.muted)
-    inventorySlots={}
-    for i,name in ipairs({"WEAPON","TOOL","HAMMER"}) do
-        local slot=Instance.new("TextLabel");slot.Name=name;slot.Size=UDim2.fromOffset(66,29);slot.Position=UDim2.fromOffset(5+(i-1)*72,22);slot.BackgroundColor3=C.slot;slot.BorderColor3=C.line;slot.BorderSizePixel=1;slot.Font=Enum.Font.Code;slot.TextSize=10;slot.TextColor3=C.text;slot.Text=name.."\n["..i.."]";slot.Parent=frame;inventorySlots[i]=slot
-    end
-end
-local function build()
-    gui=Instance.new("ScreenGui");gui.Name="LastWaveHUD";gui.ResetOnSpawn=false;gui.IgnoreGuiInset=true;gui.DisplayOrder=10;gui.Parent=localPlayer:WaitForChild("PlayerGui")
-    local top=panel(gui,UDim2.fromOffset(390,51),UDim2.new(0.5,-195,0,12));topBar=label(top,UDim2.new(1,-12,0,24),UDim2.fromOffset(6,3),"Подключение…",16);objective=label(top,UDim2.new(1,-12,0,18),UDim2.fromOffset(6,28),"",11,C.muted)
-    local left=Instance.new("Frame");left.Size=UDim2.fromOffset(250,100);left.Position=UDim2.new(0,14,1,-184);left.BackgroundTransparency=1;left.Parent=gui;label(left,UDim2.fromOffset(240,16),UDim2.fromOffset(0,0),"HP",10,C.muted);hpBar=bar(left,UDim2.fromOffset(0,17),UDim2.fromOffset(220,12),C.red);resLabel=label(left,UDim2.fromOffset(245,18),UDim2.fromOffset(0,35),"",12,C.text);resLabel.TextXAlignment=Enum.TextXAlignment.Left;buildInventory(gui)
-    ammoLabel=label(gui,UDim2.fromOffset(250,52),UDim2.new(1,-270,1,-80),"",17,C.text);ammoLabel.TextXAlignment=Enum.TextXAlignment.Right;ammoLabel.TextYAlignment=Enum.TextYAlignment.Bottom
-    local counts=panel(gui,UDim2.fromOffset(142,54),UDim2.new(1,-156,0,12));survivorLabel=label(counts,UDim2.new(1,-10,0,20),UDim2.fromOffset(5,4),"SURVIVORS  0",11,C.green);zombieLabel=label(counts,UDim2.new(1,-10,0,20),UDim2.fromOffset(5,27),"ZOMBIES  0",11,C.red)
-    notifyLabel=label(gui,UDim2.new(1,0,0,24),UDim2.new(0,0,0,77),"",13,C.yellow)
-    downedFrame=panel(gui,UDim2.fromOffset(340,70),UDim2.new(0.5,-170,0.62,0));downedFrame.BackgroundColor3=Color3.fromRGB(70,35,32);downedFrame.Visible=false;label(downedFrame,UDim2.new(1,0,0,25),UDim2.fromOffset(0,6),"ТЫ УПАЛ. ЖДИ ПОМОЩИ",15,C.text);reviveBar=bar(downedFrame,UDim2.fromOffset(20,43),UDim2.new(1,-40,0,12),C.green);reviveBar.Size=UDim2.fromScale(0,1)
-    tabFrame=panel(gui,UDim2.fromOffset(430,300),UDim2.new(0.5,-215,0.5,-150));tabFrame.Visible=false;label(tabFrame,UDim2.new(1,-20,0,25),UDim2.fromOffset(10,8),"MATCH STATUS",17,C.text);tabContent=label(tabFrame,UDim2.new(1,-20,1,-45),UDim2.fromOffset(10,40),"",12,C.text);tabContent.TextXAlignment=Enum.TextXAlignment.Left;tabContent.TextYAlignment=Enum.TextYAlignment.Top
-end
-local function notify(text)
-    notifyLabel.Text=text or "";task.delay(3,function()if notifyLabel.Text==text then notifyLabel.Text="" end end)
-end
-local function countRoles()
-    local s,z=0,0
-    for _,p in ipairs(Players:GetPlayers()) do
-        local role=p:GetAttribute("Role")
-        if role=="Zombie" then z+=1 elseif role=="Survivor" then s+=1 end
-    end
-    return s,z
-end
-local function updateCounters()
-    local s,z=countRoles();survivorLabel.Text=string.format("SURVIVORS  %02d",s);zombieLabel.Text=string.format("ZOMBIES  %02d",z)
-end
-local function updateInventory(ws)
-    if not inventorySlots then return end
-    local char=localPlayer.Character
-    local isHammer=char and char:GetAttribute("HammerEquipped")==true
-    local primary=(ws and ws.Slots and ws.Slots.Primary and ws.Slots.Primary.Def and ws.Slots.Primary.Def.Name) or "EMPTY"
-    local secondary=(ws and ws.Slots and ws.Slots.Secondary and ws.Slots.Secondary.Def and ws.Slots.Secondary.Def.Name) or "EMPTY"
-    inventorySlots[1].Text=string.format("%s\n[1]",primary:sub(1,9));inventorySlots[2].Text=string.format("%s\n[2]",secondary:sub(1,9));inventorySlots[3].Text="HAMMER\n[3]"
-    for i,slot in ipairs(inventorySlots) do
-        if isHammer then
-            slot.BackgroundColor3=(i==3 and C.line) or C.slot
-        else
-            slot.BackgroundColor3=((ws and ((i==1 and ws.Active=="Primary") or (i==2 and ws.Active=="Secondary"))) and C.line) or C.slot
-        end
-    end
-end
-local function updateTab()
-    local s,z=countRoles();local kills=0;local char=localPlayer.Character;local k=char and char:FindFirstChild("Kills");if k then kills=k.Value end
-    tabContent.Text=string.format("SURVIVORS     %02d\nZOMBIES       %02d\n\nYOUR KILLS    %02d\n\nPHASE         %s\nWAVE          %d / %d",s,z,kills,PHASE_TEXT[matchState.Phase] or tostring(matchState.Phase),matchState.Wave or 0,Config.TOTAL_WAVES)
-end
-function HUDController.Init()
-    build()
-    pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false) end)
-    task.spawn(function()local ok,s=pcall(function()return Remotes.GetGameState:InvokeServer()end);if ok and s then matchState=s end end)
-    Remotes.StateChanged.OnClientEvent:Connect(function(s)matchState=s end);Remotes.ResourcesChanged.OnClientEvent:Connect(function(r)resources=r or {} end)
-    Remotes.Notify.OnClientEvent:Connect(function(kind,arg)local text=NOTIFY_TEXT[kind];if kind=="sectorCollapse" then text="Сектор рушится! Отходим!" elseif kind=="emergencyButton" then text=tostring(arg).." нажал аварийную кнопку!" elseif kind=="purchased" then text="Куплено" elseif kind=="kitSet" then text="Набор: "..tostring(arg) elseif kind=="classSet" then text="Класс зомби: "..tostring(arg) elseif kind=="classLocked" then text=tostring(arg).." ещё закрыт" elseif kind=="placeFail" then text=tostring(arg) end;if text then notify(text)end end)
-    Remotes.PlayerInfected.OnClientEvent:Connect(function(p,class)if p==localPlayer then notify("Ты стал зомби ("..tostring(class)..")")else notify(p.DisplayName.." превратился в зомби")end end);Remotes.PlayerDowned.OnClientEvent:Connect(function(p)if p==localPlayer then downedFrame.Visible=true end end);Remotes.PlayerRevived.OnClientEvent:Connect(function(p,medic)if p==localPlayer then downedFrame.Visible=false end;notify(medic.DisplayName.." спас "..p.DisplayName)end);Remotes.ReviveProgress.OnClientEvent:Connect(function(ratio)reviveBar.Size=UDim2.fromScale(math.clamp(ratio,0,1),1)end)
-    Remotes.MatchSummary.OnClientEvent:Connect(function(sum)local text=sum.SurvivorsWon and "ВЫЖИВШИЕ ПЕРЕЖИЛИ ВСЕ ВОЛНЫ" or "КОЛОНИЯ ПАЛА";if sum.MVP then text=text.." | MVP: "..sum.MVP.Name end;notify(text)end)
-    UserInputService.InputBegan:Connect(function(input,processed)if processed then return end;if input.KeyCode==Enum.KeyCode.Tab then tabFrame.Visible=true;updateTab()end end);UserInputService.InputEnded:Connect(function(input)if input.KeyCode==Enum.KeyCode.Tab then tabFrame.Visible=false end end)
-    RunService.RenderStepped:Connect(function()
-        local left=math.max(0,math.floor((matchState.EndTime or 0)-Workspace:GetServerTimeNow()));local phase=PHASE_TEXT[matchState.Phase] or matchState.Phase;if (matchState.Wave or 0)>0 then topBar.Text=string.format("[%s]  WAVE %d/%d  %ds",phase,matchState.Wave,Config.TOTAL_WAVES,left)else topBar.Text=string.format("[%s]  %ds",phase,left)end;topBar.TextColor3=PHASE_COLOR[matchState.Phase] or C.text;objective.Text=matchState.Objective or ""
-        local char=localPlayer.Character;local hum=char and char:FindFirstChildWhichIsA("Humanoid");if hum then hpBar.Size=UDim2.fromScale(math.clamp(hum.Health/math.max(hum.MaxHealth,1),0,1),1)end;if char and not char:GetAttribute("Downed") then downedFrame.Visible=false end
-        resLabel.Text=string.format("SCRAP %03d   METAL %03d   MEDKIT %d",resources.Scrap or 0,resources.Metal or 0,resources.Medkit or 0);local ws=WeaponController.GetState();updateInventory(ws)
-        local isHammer=char and char:GetAttribute("HammerEquipped")==true
-        if isHammer then
-            ammoLabel.Text="HAMMER\nЛКМ ЧИНИТЬ / ПКМ СНЯТЬ"
-        elseif ws and ws.Def then
-            local other=ws.Active=="Primary" and ws.Slots and ws.Slots.Secondary or ws.Slots and ws.Slots.Primary
-            ammoLabel.Text=string.format("%s  %d / %d",ws.Def.Name,ws.Ammo or 0,ws.Reserve or 0)
-            if other and other.Def then ammoLabel.Text=ammoLabel.Text.."\n[X] "..other.Def.Name end
-        else
-            ammoLabel.Text=char and char:GetAttribute("Role")=="Survivor" and "NO WEAPON" or ""
-        end
-        updateCounters();if tabFrame.Visible then updateTab() end
-    end)
-end
+local Players=game:GetService("Players")
+local RunService=game:GetService("RunService")
+local Workspace=game:GetService("Workspace")
+local UserInputService=game:GetService("UserInputService")
+local StarterGui=game:GetService("StarterGui")
+local Shared=game.ReplicatedStorage.LastWaveShared
+local Config=require(Shared.Config)
+local Remotes=require(Shared.Remotes)
+local HUDController={}
+local localPlayer=Players.LocalPlayer
+local WeaponController=require(script.Parent.WeaponController)
+local gui,topBar,objective,hpBar,resLabel,ammoLabel,downedFrame,reviveBar,notifyLabel
+local survivorLabel,zombieLabel,inventorySlots,tabFrame,tabContent
+local matchState={Phase="Intermission",Wave=0,EndTime=0,Objective="Подключение…"};local resources={}
+local PHASE_TEXT={Intermission="ОЖИДАНИЕ",Preparation="СТРОЙКА",Wave="АТАКА",Transition="ОТХОД",GameOver="КОНЕЦ"}
+local PHASE_COLOR={Wave=Color3.fromRGB(155,75,75),Preparation=Color3.fromRGB(105,135,95),Transition=Color3.fromRGB(150,125,75)}
+local NOTIFY_TEXT={noResources="Не хватает ресурсов",propLimit="Лимит баррикад в секторе",wrongSize="Объект не влезает в этот проход",wrongSector="Это другой сектор",infected="Баррикада заражена",noMedkit="Нет аптечки",shopClosed="Этот товар сейчас недоступен",alreadyOwned="Уже куплено",joinedAsSurvivor="Ты выживший",joinedAsZombie="Ты заходишь как зомби",lobbyJoined="Ждём начала матча",noAmmo="Патроны кончились",ammoFull="Резерв уже полон",noWeapon="Нет оружия",placeFail="Здесь не встанет",propLimitTotal="На карте слишком много баррикад",dismantled="Баррикада снята",repairFull="Уже целая",notYours="Это не твоя баррикада",nailedHint="Установлено: сними молотком",carry="Несёшь предмет: ЛКМ поставить, R повернуть"}
+local C={bg=Color3.fromRGB(31,30,28),panel=Color3.fromRGB(49,47,43),slot=Color3.fromRGB(68,65,58),line=Color3.fromRGB(137,132,118),text=Color3.fromRGB(203,198,177),muted=Color3.fromRGB(145,140,124),red=Color3.fromRGB(145,71,68),green=Color3.fromRGB(102,131,91),yellow=Color3.fromRGB(151,125,72)}
+local function label(parent,size,pos,text,textSize,color)local l=Instance.new("TextLabel");l.Size=size;l.Position=pos;l.BackgroundTransparency=1;l.TextColor3=color or C.text;l.Font=Enum.Font.Code;l.TextSize=textSize or 16;l.Text=text;l.TextStrokeTransparency=1;l.Parent=parent;return l end
+local function panel(parent,size,pos)local f=Instance.new("Frame");f.Size=size;f.Position=pos;f.BackgroundColor3=C.panel;f.BackgroundTransparency=.08;f.BorderColor3=C.line;f.BorderSizePixel=1;f.Parent=parent;return f end
+local function bar(parent,pos,size,color)local back=Instance.new("Frame");back.Size=size;back.Position=pos;back.BackgroundColor3=C.bg;back.BorderColor3=C.line;back.BorderSizePixel=1;back.Parent=parent;local fill=Instance.new("Frame");fill.Size=UDim2.fromScale(1,1);fill.BackgroundColor3=color;fill.BorderSizePixel=0;fill.Parent=back;return fill end
+local function buildInventory(parent)local frame=panel(parent,UDim2.fromOffset(224,58),UDim2.new(0,14,1,-72));label(frame,UDim2.new(1,-10,0,16),UDim2.fromOffset(5,3),"INVENTORY",10,C.muted);inventorySlots={};for i,name in ipairs({"WEAPON","TOOL","HAMMER"})do local slot=Instance.new("TextLabel");slot.Name=name;slot.Size=UDim2.fromOffset(66,29);slot.Position=UDim2.fromOffset(5+(i-1)*72,22);slot.BackgroundColor3=C.slot;slot.BorderColor3=C.line;slot.BorderSizePixel=1;slot.Font=Enum.Font.Code;slot.TextSize=10;slot.TextColor3=C.text;slot.Text=name.."\n["..i.."]";slot.Parent=frame;inventorySlots[i]=slot end end
+local function build()gui=Instance.new("ScreenGui");gui.Name="LastWaveHUD";gui.ResetOnSpawn=false;gui.IgnoreGuiInset=true;gui.DisplayOrder=10;gui.Parent=localPlayer:WaitForChild("PlayerGui");local top=panel(gui,UDim2.fromOffset(390,51),UDim2.new(.5,-195,0,12));topBar=label(top,UDim2.new(1,-12,0,24),UDim2.fromOffset(6,3),"Подключение…",16);objective=label(top,UDim2.new(1,-12,0,18),UDim2.fromOffset(6,28),"",11,C.muted);local left=Instance.new("Frame");left.Size=UDim2.fromOffset(250,100);left.Position=UDim2.new(0,14,1,-184);left.BackgroundTransparency=1;left.Parent=gui;label(left,UDim2.fromOffset(240,16),UDim2.fromOffset(0,0),"HP",10,C.muted);hpBar=bar(left,UDim2.fromOffset(0,17),UDim2.fromOffset(220,12),C.red);resLabel=label(left,UDim2.fromOffset(245,18),UDim2.fromOffset(0,35),"",12,C.text);resLabel.TextXAlignment=Enum.TextXAlignment.Left;buildInventory(gui);ammoLabel=label(gui,UDim2.fromOffset(250,52),UDim2.new(1,-270,1,-80),"",17,C.text);ammoLabel.TextXAlignment=Enum.TextXAlignment.Right;ammoLabel.TextYAlignment=Enum.TextYAlignment.Bottom;local counts=panel(gui,UDim2.fromOffset(142,54),UDim2.new(1,-156,0,12));survivorLabel=label(counts,UDim2.new(1,-10,0,20),UDim2.fromOffset(5,4),"SURVIVORS  0",11,C.green);zombieLabel=label(counts,UDim2.new(1,-10,0,20),UDim2.fromOffset(5,27),"ZOMBIES  0",11,C.red);notifyLabel=label(gui,UDim2.new(1,0,0,24),UDim2.new(0,0,0,77),"",13,C.yellow);downedFrame=panel(gui,UDim2.fromOffset(340,70),UDim2.new(.5,-170,.62,0));downedFrame.BackgroundColor3=Color3.fromRGB(70,35,32);downedFrame.Visible=false;label(downedFrame,UDim2.new(1,0,0,25),UDim2.fromOffset(0,6),"ТЫ УПАЛ. ЖДИ ПОМОЩИ",15,C.text);reviveBar=bar(downedFrame,UDim2.fromOffset(20,43),UDim2.new(1,-40,0,12),C.green);reviveBar.Size=UDim2.fromScale(0,1);tabFrame=panel(gui,UDim2.fromOffset(430,300),UDim2.new(.5,-215,.5,-150));tabFrame.Visible=false;label(tabFrame,UDim2.new(1,-20,0,25),UDim2.fromOffset(10,8),"MATCH STATUS",17,C.text);tabContent=label(tabFrame,UDim2.new(1,-20,1,-45),UDim2.fromOffset(10,40),"",12,C.text);tabContent.TextXAlignment=Enum.TextXAlignment.Left;tabContent.TextYAlignment=Enum.TextYAlignment.Top end
+local function notify(text)notifyLabel.Text=text or "";task.delay(3,function()if notifyLabel.Text==text then notifyLabel.Text=""end end)end
+local function countRoles()local s,z=0,0;for _,p in ipairs(Players:GetPlayers())do local c=p.Character;local role=c and c:GetAttribute("Role");if role=="Zombie"then z+=1 elseif role=="Survivor"then s+=1 end end;return s,z end
+local function updateCounters()local s,z=countRoles();survivorLabel.Text=string.format("SURVIVORS  %02d",s);zombieLabel.Text=string.format("ZOMBIES  %02d",z)end
+local function updateInventory(ws)if not inventorySlots then return end;local char=localPlayer.Character;local isHammer=char and char:GetAttribute("HammerEquipped")==true;local primary=(ws and ws.Slots and ws.Slots.Primary and ws.Slots.Primary.Def and ws.Slots.Primary.Def.Name)or"EMPTY";local secondary=(ws and ws.Slots and ws.Slots.Secondary and ws.Slots.Secondary.Def and ws.Slots.Secondary.Def.Name)or"EMPTY";inventorySlots[1].Text=string.format("%s\n[1]",primary:sub(1,9));inventorySlots[2].Text=string.format("%s\n[2]",secondary:sub(1,9));inventorySlots[3].Text="HAMMER\n[3]";for i,slot in ipairs(inventorySlots)do if isHammer then slot.BackgroundColor3=(i==3 and C.line)or C.slot else slot.BackgroundColor3=((ws and((i==1 and ws.Active=="Primary")or(i==2 and ws.Active=="Secondary")))and C.line)or C.slot end end end
+local function updateTab()local s,z=countRoles();local kills=0;local ls=localPlayer:FindFirstChild("leaderstats");local k=ls and ls:FindFirstChild("Kills");if k and k:IsA("IntValue")then kills=k.Value end;tabContent.Text=string.format("SURVIVORS     %02d\nZOMBIES       %02d\n\nYOUR KILLS    %02d\n\nPHASE         %s\nWAVE          %d / %d",s,z,kills,PHASE_TEXT[matchState.Phase]or tostring(matchState.Phase),matchState.Wave or 0,Config.TOTAL_WAVES)end
+function HUDController.Init()build();pcall(function()StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack,false)end);task.spawn(function()local ok,s=pcall(function()return Remotes.GetGameState:InvokeServer()end);if ok and s then matchState=s end end);Remotes.StateChanged.OnClientEvent:Connect(function(s)matchState=s end);Remotes.ResourcesChanged.OnClientEvent:Connect(function(r)resources=r or{}end);Remotes.Notify.OnClientEvent:Connect(function(kind,arg)local text=NOTIFY_TEXT[kind];if kind=="sectorCollapse"then text="Сектор рушится! Отходим!"elseif kind=="emergencyButton"then text=tostring(arg).." нажал аварийную кнопку!"elseif kind=="purchased"then text="Куплено"elseif kind=="kitSet"then text="Набор: "..tostring(arg)elseif kind=="classSet"then text="Класс зомби: "..tostring(arg)elseif kind=="classLocked"then text=tostring(arg).." ещё закрыт"elseif kind=="placeFail"then text=tostring(arg)end;if text then notify(text)end end);Remotes.PlayerInfected.OnClientEvent:Connect(function(p,class)if p==localPlayer then notify("Ты стал зомби ("..tostring(class)..")")else notify(p.DisplayName.." превратился в зомби")end end);Remotes.PlayerDowned.OnClientEvent:Connect(function(p)if p==localPlayer then downedFrame.Visible=true end end);Remotes.PlayerRevived.OnClientEvent:Connect(function(p,medic)if p==localPlayer then downedFrame.Visible=false end;notify(medic.DisplayName.." спас "..p.DisplayName)end);Remotes.ReviveProgress.OnClientEvent:Connect(function(ratio)reviveBar.Size=UDim2.fromScale(math.clamp(ratio,0,1),1)end);Remotes.MatchSummary.OnClientEvent:Connect(function(sum)local text=sum.SurvivorsWon and"ВЫЖИВШИЕ ПЕРЕЖИЛИ ВСЕ ВОЛНЫ"or"КОЛОНИЯ ПАЛА";if sum.MVP then text=text.." | MVP: "..sum.MVP.Name end;notify(text)end);UserInputService.InputBegan:Connect(function(input,processed)if processed then return end;if input.KeyCode==Enum.KeyCode.Tab then tabFrame.Visible=true;updateTab()end end);UserInputService.InputEnded:Connect(function(input)if input.KeyCode==Enum.KeyCode.Tab then tabFrame.Visible=false end end);RunService.RenderStepped:Connect(function()local left=math.max(0,math.floor((matchState.EndTime or 0)-Workspace:GetServerTimeNow()));local phase=PHASE_TEXT[matchState.Phase]or matchState.Phase;if(matchState.Wave or 0)>0 then topBar.Text=string.format("[%s] WAVE %d/%d %ds",phase,matchState.Wave,Config.TOTAL_WAVES,left)else topBar.Text=string.format("[%s] %ds",phase,left)end;topBar.TextColor3=PHASE_COLOR[matchState.Phase]or C.text;objective.Text=matchState.Objective or"";local char=localPlayer.Character;local hum=char and char:FindFirstChildWhichIsA("Humanoid");if hum then hpBar.Size=UDim2.fromScale(math.clamp(hum.Health/math.max(hum.MaxHealth,1),0,1),1)end;if char and not char:GetAttribute("Downed")then downedFrame.Visible=false end;resLabel.Text=string.format("SCRAP %03d METAL %03d MEDKIT %d",resources.Scrap or 0,resources.Metal or 0,resources.Medkit or 0);local ws=WeaponController.GetState();updateInventory(ws);local isHammer=char and char:GetAttribute("HammerEquipped")==true;if isHammer then ammoLabel.Text="HAMMER\nЛКМ ЧИНИТЬ / ПКМ СНЯТЬ"elseif ws and ws.Def then local other=ws.Active=="Primary" and ws.Slots and ws.Slots.Secondary or ws.Slots and ws.Slots.Primary;ammoLabel.Text=string.format("%s %d / %d",ws.Def.Name,ws.Ammo or 0,ws.Reserve or 0);if other and other.Def then ammoLabel.Text=ammoLabel.Text.."\n[X] "..other.Def.Name end else ammoLabel.Text=char and char:GetAttribute("Role")=="Survivor"and"NO WEAPON"or""end;updateCounters();if tabFrame.Visible then updateTab()end end)end
 return HUDController

@@ -21,43 +21,29 @@ local pathCache,pathQueue,queued,pathPool={}, {}, {}, {}
 local pathUses=0
 local function cellOf(p:Vector3)local c=Config.AI_PATH_CELL;return string.format("%d_%d_%d",math.floor(p.X/c),math.floor(p.Y/(c*2)),math.floor(p.Z/c))end
 local function borrowPath(jump:boolean)
-	pathUses+=1;if pathUses%Config.AI_PATH_RECYCLE==0 then for _,p in pathPool do pcall(function()p:Destroy()end)end;table.clear(pathPool)end
-	local k=if jump then "jump" else "nojump";pathPool[k]=pathPool[k] or PathfindingService:CreatePath({AgentRadius=2.2,AgentHeight=5,AgentCanJump=jump,AgentCanClimb=false,WaypointSpacing=6,Costs={Barricade=12,Water=20}});return pathPool[k]
+ pathUses+=1;if pathUses%Config.AI_PATH_RECYCLE==0 then for _,p in pathPool do pcall(function()p:Destroy()end)end;table.clear(pathPool)end
+ local k=if jump then "jump" else "nojump";pathPool[k]=pathPool[k] or PathfindingService:CreatePath({AgentRadius=2.2,AgentHeight=5,AgentCanJump=jump,AgentCanClimb=false,WaypointSpacing=6,Costs={Barricade=12,Water=20}});return pathPool[k]
 end
 local function requestPath(a:Vector3,b:Vector3,jump:boolean):string
-	local k=cellOf(a)..">"..cellOf(b)..(if jump then "J" else "W");local cached=pathCache[k];if cached and os.clock()-cached.t<Config.AI_PATH_CACHE_TTL then return k end;if queued[k] or #pathQueue>40 then return k end;queued[k]=true;table.insert(pathQueue,{key=k,from=a,to=b,jump=jump});return k
+ local k=cellOf(a)..">"..cellOf(b)..(if jump then "J" else "W");local cached=pathCache[k];if cached and os.clock()-cached.t<Config.AI_PATH_CACHE_TTL then return k end;if queued[k] or #pathQueue>40 then return k end;queued[k]=true;table.insert(pathQueue,{key=k,from=a,to=b,jump=jump});return k
 end
 local function pathWorker()
-	while true do task.wait(1/math.max(Config.AI_PATH_BUDGET_PER_SEC,1));local r=table.remove(pathQueue,1);if r then queued[r.key]=nil;local p=borrowPath(r.jump);local ok=pcall(function()p:ComputeAsync(r.from,r.to)end);if not ok or p.Status~=Enum.PathStatus.Success then pathCache[r.key]={points=false,t=os.clock()}else local points={};for _,w in p:GetWaypoints() do table.insert(points,w.Position)end;pathCache[r.key]={points=points,t=os.clock()}end end end
+ while true do task.wait(1/math.max(Config.AI_PATH_BUDGET_PER_SEC,1));local r=table.remove(pathQueue,1);if r then queued[r.key]=nil;local p=borrowPath(r.jump);local ok=pcall(function()p:ComputeAsync(r.from,r.to)end);if not ok or p.Status~=Enum.PathStatus.Success then pathCache[r.key]={points=false,t=os.clock()}else local points={};for _,w in p:GetWaypoints() do table.insert(points,w.Position)end;pathCache[r.key]={points=points,t=os.clock()}end end end
 end
 local function cleanPathCache()local now=os.clock();for k,e in pathCache do if now-e.t>Config.AI_PATH_CACHE_TTL*3 then pathCache[k]=nil end end end
 local function getRig(z:string)local b=pool[z];if b and #b>0 then local m=table.remove(b);if m and not m.Parent then ZombieRig.Reset(m);return m end end;return ZombieRig.Build(z,true)end
 local function recycle(m:Model,z:string)pool[z]=pool[z] or {};if #pool[z]>=Config.AI_POOL_MAX then m:Destroy();return end;m.Parent=nil;ZombieRig.Reset(m);table.insert(pool[z],m)end
-function ZombieManager.PoolSize()local n=0;for _,b in pool do n+=#b end;return n end
+function ZombieManager.PoolSize()local n=0;for _,b in pool do n+=#b end return n end
 local function updateWorld()
-	world.t=os.clock();world.sector=MatchState.SectorName();table.clear(world.survivors);for _,p in PlayerManager.GetAllSurvivors() do local c=p.Character;local r=c and c:FindFirstChild("HumanoidRootPart");if r then table.insert(world.survivors,{char=c,root=r,pos=r.Position,downed=c:GetAttribute("Downed")==true})end end
-	table.clear(world.props);for _,prop in BarricadeManager.GetNailedInSector(world.sector) do local part=if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart");if part then table.insert(world.props,{prop=prop,part=part,pos=part.Position})end end
+ world.t=os.clock();world.sector=MatchState.SectorName();table.clear(world.survivors);for _,p in PlayerManager.GetAllSurvivors() do local c=p.Character;local r=c and c:FindFirstChild("HumanoidRootPart");if r then table.insert(world.survivors,{char=c,root=r,pos=r.Position,downed=c:GetAttribute("Downed")==true})end end
+ table.clear(world.props);for _,prop in BarricadeManager.GetNailedInSector(world.sector) do local part=if prop:IsA("BasePart") then prop else prop:FindFirstChildWhichIsA("BasePart");if part then table.insert(world.props,{prop=prop,part=part,pos=part.Position})end end
 end
 local warnedNoSpawns=false
 local function pickSpawn():CFrame?
-	local f=Workspace:FindFirstChild("ZombieSpawns");if not f then if not warnedNoSpawns then warnedNoSpawns=true;warn("[AI] Workspace.ZombieSpawns отсутствует")end;return nil end
-	local list,fallbackList={},{}
-	for _,part in f:GetDescendants() do
-		if part:IsA("BasePart") then
-			local sec=part:GetAttribute("Sector")
-			if sec==nil or sec==world.sector then
-				table.insert(fallbackList,part)
-				local ok=true
-				for _,s in world.survivors do
-					if (s.pos-part.Position).Magnitude<Config.AI_MIN_SPAWN_DIST then ok=false;break end
-				end
-				if ok then table.insert(list,part)end
-			end
-		end
-	end
-	local chosen = (#list > 0 and list) or fallbackList
-	if #chosen==0 then return nil end
-	return chosen[math.random(1,#chosen)].CFrame+Vector3.new(0,3,0)
+ local f=Workspace:FindFirstChild("ZombieSpawns");if not f then if not warnedNoSpawns then warnedNoSpawns=true;warn("[AI] Workspace.ZombieSpawns отсутствует")end;return nil end
+ local list,fallbackList={},{}
+ for _,part in f:GetDescendants() do if part:IsA("BasePart") then local sec=part:GetAttribute("Sector");if sec==nil or sec==world.sector then table.insert(fallbackList,part);local ok=true;for _,s in world.survivors do if (s.pos-part.Position).Magnitude<Config.AI_MIN_SPAWN_DIST then ok=false;break end end;if ok then table.insert(list,part)end end end end
+ local chosen=(#list>0 and list)or fallbackList;if #chosen==0 then return nil end;return chosen[math.random(1,#chosen)].CFrame+Vector3.new(0,3,0)
 end
 local function playerCount()return math.max(#Players:GetPlayers(),1)end
 local W=Config.WAVE_ZOMBIES
@@ -66,96 +52,46 @@ local function waveBudget(wave:number)local n=(W.Base+playerCount()*W.PerPlayer)
 local function spawnInterval()return math.max(W.MinSpawnInterval,W.SpawnIntervalBase+(playerCount()-1)*W.SpawnIntervalPerPlayer)end
 function ZombieManager.Count()return #agents end
 function ZombieManager.SpawnAI(zType:string):Model?
-	if #agents>=aliveCap() then return nil end;local cf=pickSpawn();if not cf then return nil end;local def=ZombieTypes[zType] or ZombieTypes.Walker;if def.PlayerOnly then def=ZombieTypes.Walker;zType="Walker"end;local char=getRig(zType);if not char then return nil end
-	char.Name="Infected_"..zType;char:SetAttribute("Role","Zombie");char:SetAttribute("ZombieType",zType);char:SetAttribute("IsAI",true);local hum=char:FindFirstChildWhichIsA("Humanoid");local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart");if not hum or not root then char:Destroy();return nil end
-	hum.MaxHealth=def.MaxHealth*Config.AI_HEALTH_MULT;hum.Health=hum.MaxHealth;hum.WalkSpeed=def.WalkSpeed*Config.AI_SPEED_MULT;hum.JumpPower=def.JumpPower;char.Parent=aiFolder;char:PivotTo(cf);PhysicsSetup.ApplyToCharacter(char,"Zombie");require(script.Parent.RigScale).ApplyZombie(char,hum,zType);ZombieRig.GiveOwnership(char,nil)
-	local a={model=char,hum=hum,root=root,def=def,zType=zType,nextThink=0,target=nil,blockedBy=nil,pathKey=nil,pathIndex=1,pathTime=0,losOk=false,losTime=0,lastAttack=0,lastPos=root.Position,stuck=0,dead=false};agentByModel[char]=a;table.insert(agents,a);hum.Died:Connect(function()a.dead=true end);return char
+ if #agents>=aliveCap() then return nil end;local cf=pickSpawn();if not cf then return nil end;local def=ZombieTypes[zType]or ZombieTypes.Walker;if def.PlayerOnly then def=ZombieTypes.Walker;zType="Walker"end;local char=getRig(zType);if not char then return nil end
+ char.Name="Infected_"..zType;char:SetAttribute("Role","Zombie");char:SetAttribute("ZombieType",zType);char:SetAttribute("IsAI",true);local hum=char:FindFirstChildWhichIsA("Humanoid");local root=char.PrimaryPart or char:FindFirstChild("HumanoidRootPart");if not hum or not root then char:Destroy();return nil end
+ hum.MaxHealth=def.MaxHealth*Config.AI_HEALTH_MULT;hum.Health=hum.MaxHealth;hum.WalkSpeed=def.WalkSpeed*Config.AI_SPEED_MULT;hum.JumpPower=def.JumpPower;char.Parent=aiFolder;char:PivotTo(cf);PhysicsSetup.ApplyToCharacter(char,"Zombie");require(script.Parent.RigScale).ApplyZombie(char,hum,zType);ZombieRig.GiveOwnership(char,nil)
+ local a={model=char,hum=hum,root=root,def=def,zType=zType,nextThink=0,target=nil,blockedBy=nil,pathKey=nil,pathIndex=1,pathTime=0,losOk=false,losTime=0,lastAttack=0,lastPos=root.Position,stuck=0,dead=false};agentByModel[char]=a;table.insert(agents,a);hum.Died:Connect(function()a.dead=true end);return char
 end
 local function removeAgent(i:number)local a=agents[i];if not a then return end;agentByModel[a.model]=nil;table.remove(agents,i);local m=a.model;if m and m.Parent then task.delay(3.5,function()if m.Parent then recycle(m,a.zType)end end)end end
 local function los(a,pos):boolean
-	rayParams.FilterDescendantsInstances={a.model};local res=Workspace:Raycast(a.root.Position+Vector3.new(0,1.5,0),pos-(a.root.Position+Vector3.new(0,1.5,0)),rayParams);if not res then a.blockedBy=nil;return true end;a.blockedBy=BarricadeManager.ResolveProp(res.Instance);return false
+ rayParams.FilterDescendantsInstances={a.model};local res=Workspace:Raycast(a.root.Position+Vector3.new(0,1.5,0),pos-(a.root.Position+Vector3.new(0,1.5,0)),rayParams);if not res then a.blockedBy=nil;return true end;a.blockedBy=BarricadeManager.ResolveProp(res.Instance);return false
 end
 local function target(a)local best,bd=nil,400;for _,s in world.survivors do local d=(s.pos-a.root.Position).Magnitude+(s.downed and 25 or 0);if d<bd then bd=d;best=s end end;return best end
 local function nearestProp(a,maxDist)local best,bd=nil,maxDist;for _,p in world.props do local d=(p.pos-a.root.Position).Magnitude;if d<bd then best=p;bd=d end end;return best end
 local function separate(a)local push=Vector3.zero;local count=0;for _,o in agents do if o~=a and not o.dead then local d=a.root.Position-o.root.Position;local n=d.Magnitude;if n>0.1 and n<Config.AI_SEPARATION_RADIUS then push+=d.Unit*(1-n/Config.AI_SEPARATION_RADIUS);count+=1;if count>=4 then break end end end end;return push*Config.AI_SEPARATION_FORCE end
 local function attack(a,s)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;PlayerManager.ApplyDamage(s.char,a.def.Damage*Config.AI_DAMAGE_MULT,nil)end
-local function attackProp(a,p)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;BarricadeManager.DamageProp(p.prop,a.def.Damage*Config.AI_PROP_DAMAGE_MULT*math.max(a.def.PropDamageMultiplier or 1, 1),nil)end
+local function attackProp(a,p)local now=os.clock();if now-a.lastAttack<a.def.AttackCooldown then return end;a.lastAttack=now;BarricadeManager.DamageProp(p.prop,a.def.Damage*Config.AI_PROP_DAMAGE_MULT*(a.def.PropDamageMultiplier or 1),nil);a.lastAttack=now end
 local function followPath(a,pos):Vector3?
-	local jump=a.def.JumpPower>0;local now=os.clock();if not a.pathKey or now-a.pathTime>Config.AI_PATH_MAX_AGE then a.pathKey=requestPath(a.root.Position,pos,jump);a.pathTime=now;a.pathIndex=1 end;local e=pathCache[a.pathKey];if not e or e.points==false then return nil end;local my=a.root.Position;while a.pathIndex<=#e.points and (Vector3.new(e.points[a.pathIndex].X,0,e.points[a.pathIndex].Z)-Vector3.new(my.X,0,my.Z)).Magnitude<Config.AI_WAYPOINT_REACH do a.pathIndex+=1 end;if a.pathIndex>#e.points then a.pathKey=nil;return nil end;local wp=e.points[a.pathIndex];if jump and wp.Y-my.Y>3 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end;return wp-my
+ local jump=a.def.JumpPower>0;local now=os.clock();if not a.pathKey or now-a.pathTime>Config.AI_PATH_MAX_AGE then a.pathKey=requestPath(a.root.Position,pos,jump);a.pathTime=now;a.pathIndex=1 end;local e=pathCache[a.pathKey];if not e or e.points==false then return nil end;local my=a.root.Position;while a.pathIndex<=#e.points and (Vector3.new(e.points[a.pathIndex].X,0,e.points[a.pathIndex].Z)-Vector3.new(my.X,0,my.Z)).Magnitude<Config.AI_WAYPOINT_REACH do a.pathIndex+=1 end;if a.pathIndex>#e.points then a.pathKey=nil;return nil end;local wp=e.points[a.pathIndex];if jump and wp.Y-my.Y>3 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end;return wp-my
 end
 local function think(a)
-	if a.hum.Health<=0 then a.dead=true;return end
-	local my=a.root.Position
-	local s=target(a)
-	if not s then a.hum:Move(Vector3.zero);a.nextThink=os.clock()+0.8;return end
-	local dist=(s.pos-my).Magnitude
-	if dist>Config.AI_DESPAWN_DIST then a.dead=true;return end
-	local rate=1/Config.AI_TICK_HZ
-	if dist>Config.AI_LOD_FAR then rate*=4 elseif dist>Config.AI_LOD_NEAR then rate*=2 end
-	a.nextThink=os.clock()+rate
-
-	if dist<=a.def.AttackRange+Config.AI_ATTACK_SLACK and (a.losOk or los(a,s.pos)) then
-		attack(a,s);a.hum:Move(Vector3.zero);return
-	end
-
-	local now=os.clock()
-	if now-a.losTime>Config.AI_LOS_RECHECK then
-		a.losTime=now
-		a.losOk=los(a,s.pos)
-	end
-
-	-- Если на пути баррикада — зомби бьют её немедленно, если подошли вплотную
-	if a.blockedBy then
-		local part=if a.blockedBy:IsA("BasePart") then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart")
-		if part and (part.Position-my).Magnitude<=a.def.AttackRange+3.5 then
-			attackProp(a,{prop=a.blockedBy,part=part})
-			a.hum:Move(Vector3.zero)
-			return
-		end
-	end
-
-	local desired
-	if a.losOk then
-		a.pathKey=nil
-		desired=s.pos-my
-	elseif a.blockedBy then
-		local part=if a.blockedBy:IsA("BasePart") then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart")
-		desired=part and (part.Position-my) or (s.pos-my)
-	else
-		desired=followPath(a,s.pos) or (s.pos-my)
-	end
-
-	if (my-a.lastPos).Magnitude<Config.AI_STUCK_DIST then a.stuck+=rate else a.stuck=0 end
-	a.lastPos=my
-	if a.stuck>=Config.AI_STUCK_TIME then
-		a.stuck=0
-		local p=nearestProp(a,a.def.AttackRange+3.5)
-		if p then
-			attackProp(a,p)
-			a.hum:Move(Vector3.zero)
-			return
-		end
-		a.pathKey=nil
-		local side=math.random()>0.5 and 1 or -1
-		local flat=Vector3.new(desired.X,0,desired.Z)
-		if flat.Magnitude>0.1 then desired+=Vector3.new(-flat.Z,0,flat.X).Unit*12*side end
-		if a.def.JumpPower>0 and math.random()<0.4 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping) end
-	end
-
-	local flat=Vector3.new(desired.X,0,desired.Z)
-	a.hum:Move(flat.Magnitude>0.1 and (flat.Unit+separate(a)).Unit or Vector3.zero)
-	a.hum.WalkSpeed=a.def.WalkSpeed*Config.AI_SPEED_MULT*(a.model:GetAttribute("Enraged") and 1.35 or 1)
+ if a.hum.Health<=0 then a.dead=true;return end
+ local my=a.root.Position;local s=target(a);if not s then a.hum:Move(Vector3.zero);a.nextThink=os.clock()+0.8;return end
+ local dist=(s.pos-my).Magnitude;if dist>Config.AI_DESPAWN_DIST then a.dead=true;return end
+ local rate=1/Config.AI_TICK_HZ;if dist>Config.AI_LOD_FAR then rate*=4 elseif dist>Config.AI_LOD_NEAR then rate*=2 end;a.nextThink=os.clock()+rate
+ if dist<=a.def.AttackRange+Config.AI_ATTACK_SLACK and(a.losOk or los(a,s.pos))then attack(a,s);a.hum:Move(Vector3.zero);return end
+ local now=os.clock();if now-a.losTime>Config.AI_LOS_RECHECK then a.losTime=now;a.losOk=los(a,s.pos)end
+ if a.blockedBy then local part=if a.blockedBy:IsA("BasePart")then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart");if part and(part.Position-my).Magnitude<=a.def.AttackRange+3.5 then attackProp(a,{prop=a.blockedBy,part=part});a.hum:Move(Vector3.zero);return end end
+ local desired;if a.losOk then a.pathKey=nil;desired=s.pos-my elseif a.blockedBy then local part=if a.blockedBy:IsA("BasePart")then a.blockedBy else a.blockedBy:FindFirstChildWhichIsA("BasePart");desired=part and(part.Position-my)or(s.pos-my)else desired=followPath(a,s.pos)or(s.pos-my)end
+ if(my-a.lastPos).Magnitude<Config.AI_STUCK_DIST then a.stuck+=rate else a.stuck=0 end;a.lastPos=my
+ if a.stuck>=Config.AI_STUCK_TIME then a.stuck=0;local p=nearestProp(a,a.def.AttackRange+3.5);if p then attackProp(a,p);a.hum:Move(Vector3.zero);return end;a.pathKey=nil;local side=math.random()>0.5 and 1 or-1;local flat=Vector3.new(desired.X,0,desired.Z);if flat.Magnitude>0.1 then desired+=Vector3.new(-flat.Z,0,flat.X).Unit*12*side end;if a.def.JumpPower>0 and math.random()<0.4 then a.hum:ChangeState(Enum.HumanoidStateType.Jumping)end end
+ local flat=Vector3.new(desired.X,0,desired.Z);a.hum:Move(flat.Magnitude>0.1 and(flat.Unit+separate(a)).Unit or Vector3.zero);a.hum.WalkSpeed=a.def.WalkSpeed*Config.AI_SPEED_MULT*(a.model:GetAttribute("Enraged")and 1.35 or 1)
 end
 local function schedulerStep()
-	local phase=MatchState.Phase();if phase=="GameOver" or phase=="Intermission" then if #agents>0 then ZombieManager.ClearAllAI()end;return end;if os.clock()-world.t>1/Config.AI_SNAPSHOT_HZ then updateWorld()end;for i=#agents,1,-1 do local a=agents[i];if a.dead or not a.model.Parent or a.hum.Health<=0 then removeAgent(i)end end;local now=os.clock();local done=0;for _=1,#agents do if done>=math.max(Config.AI_SLICE,1) then break end;sliceCursor=sliceCursor%math.max(#agents,1)+1;local a=agents[sliceCursor];if a and now>=a.nextThink then done+=1;local ok,e=pcall(think,a);if not ok then warn("[AI] think: "..tostring(e));a.nextThink=now+1 end end end
+ local phase=MatchState.Phase();if phase=="GameOver"or phase=="Intermission"then if #agents>0 then ZombieManager.ClearAllAI()end;return end;if os.clock()-world.t>1/Config.AI_SNAPSHOT_HZ then updateWorld()end;for i=#agents,1,-1 do local a=agents[i];if a.dead or not a.model.Parent or a.hum.Health<=0 then removeAgent(i)end end;local now=os.clock();local done=0;for _=1,#agents do if done>=math.max(Config.AI_SLICE,1)then break end;sliceCursor=sliceCursor%math.max(#agents,1)+1;local a=agents[sliceCursor];if a and now>=a.nextThink then done+=1;local ok,e=pcall(think,a);if not ok then warn("[AI] think: "..tostring(e));a.nextThink=now+1 end end end
 end
 function ZombieManager.WaveCleared()return not spawning and spawnBudget<=0 and #agents==0 end
 function ZombieManager.StartWave(wave:number)
-	if not Config.AI_ENABLED then return end;spawning=true;spawnBudget=waveBudget(wave);task.spawn(function()local mix={"Walker","Walker","Walker","Runner"};if wave>=2 then table.insert(mix,"Brute")end;if wave>=3 then table.insert(mix,"Runner")end;if wave>=4 then table.insert(mix,"Brute")end;while spawning and spawnBudget>0 and MatchState.Phase()=="Wave" do if #agents<aliveCap() then if ZombieManager.SpawnAI(mix[math.random(1,#mix)]) then spawnBudget-=1 end end;task.wait(spawnInterval())end;spawning=false end)
+ if not Config.AI_ENABLED then return end;spawning=true;spawnBudget=waveBudget(wave);task.spawn(function()local mix={"Walker","Walker","Walker","Runner"};if wave>=2 then table.insert(mix,"Brute")end;if wave>=3 then table.insert(mix,"Runner")end;if wave>=4 then table.insert(mix,"Brute")end;while spawning and spawnBudget>0 and MatchState.Phase()=="Wave" do if #agents<aliveCap() then if ZombieManager.SpawnAI(mix[math.random(1,#mix)])then spawnBudget-=1 end end;task.wait(spawnInterval())end;spawning=false end)
 end
 function ZombieManager.StopWave()spawning=false;spawnBudget=0 end
 function ZombieManager.ClearAllAI()spawning=false;for i=#agents,1,-1 do local a=agents[i];agentByModel[a.model]=nil;table.remove(agents,i);if a.model.Parent then recycle(a.model,a.zType)end end;table.clear(pathQueue);table.clear(queued);table.clear(pathCache)end
 function ZombieManager.Init()
-	aiFolder=Workspace:FindFirstChild("AIZombies") or Instance.new("Folder");aiFolder.Name="AIZombies";aiFolder.Parent=Workspace;updateWorld();task.spawn(pathWorker);task.spawn(function()while true do task.wait(6);cleanPathCache()end end);RunService.Heartbeat:Connect(function()local ok,e=pcall(schedulerStep);if not ok then warn("[AI] scheduler: "..tostring(e))end end);task.defer(function()if Config.AI_ENABLED then for _,z in {"Walker","Runner","Brute"} do for _=1,3 do local m=ZombieRig.Build(z,true);if not m then break end;recycle(m,z)end end end end)
+ aiFolder=Workspace:FindFirstChild("AIZombies")or Instance.new("Folder");aiFolder.Name="AIZombies";aiFolder.Parent=Workspace;updateWorld();task.spawn(pathWorker);task.spawn(function()while true do task.wait(6);cleanPathCache()end end);RunService.Heartbeat:Connect(function()local ok,e=pcall(schedulerStep);if not ok then warn("[AI] scheduler: "..tostring(e))end end);task.defer(function()if Config.AI_ENABLED then for _,z in {"Walker","Runner","Brute"}do for _=1,3 do local m=ZombieRig.Build(z,true);if not m then break end;recycle(m,z)end end end end)
 end
 return ZombieManager
